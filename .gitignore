@@ -1,0 +1,7 @@
+# Files to ignore
+*/__pycache__/*.pyc
+__pycache__/*.pyc
+saved_models/*
+test*
+wandb/*
+logging/*
