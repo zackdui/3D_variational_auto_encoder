@@ -8,7 +8,6 @@ import logging
 import wandb
 import time
 
-
 from evaluation import evaluate_model_on_full_volumes
 
 def eval_model_3D(model, 
@@ -41,7 +40,6 @@ def eval_model_3D(model,
         "num_gpus_visible": torch.cuda.device_count(),
     }
 
-
     # Initialize DDP if launched with torchrun.
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
@@ -62,7 +60,7 @@ def eval_model_3D(model,
     if rank == 0 and use_wandb:  # only main process
         wandb.init(
             project="3d-vae",     # choose a project name (creates if missing)
-            name=f"eval_{wandb_run_name}_{time.time()}",        # optional run name
+            name=f"eval_{wandb_run_name}_{time.time()}",        # run name
             config=hparams,       # logs hyperparameters automatically
         )
         logger.info("Initialized Weights & Biases run: %s (id=%s)", wandb.run.name, wandb.run.id)

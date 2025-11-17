@@ -1,4 +1,4 @@
-# This Will check the feasibility of a batch size on your GPU
+# This will check the feasibility of a batch size on your GPU
 
 import torch
 from torch.cuda import OutOfMemoryError
@@ -100,13 +100,6 @@ def find_max_batch_size_power2(
 def test_memory(model, use_amp=False):
         device = "cuda"
 
-        # Dummy model (replace with your real model)
-        # attn_params = AttnParams(num_heads=4, 
-        #                             dim_head=32, 
-        #                             dropout=.1, 
-        #                             window_size=(4, 8, 8), 
-        #                             use_rel_pos_bias=True)
-        # model = CustomVAE(blocks_down=(1,2,2,4), blocks_up=(1,1,1), use_attn=True, attn_params=attn_params)
         model.to(device)
         model.train()
 

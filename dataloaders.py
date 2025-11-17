@@ -1,5 +1,7 @@
+# This file is used to create datasets that are patches of 3D volumes or a random 3D dataset
+
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 class RandomPatch3DDataset(Dataset):
     def __init__(self, base_dataset: Dataset, patch_size, patches_per_volume: int = 1, dataset_length: int | None =None):
