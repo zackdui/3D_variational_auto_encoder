@@ -5,3 +5,4 @@ test*
 wandb/*
 logging/*
 checkpoints/*
+random_test_checkpoints/*

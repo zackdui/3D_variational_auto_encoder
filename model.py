@@ -138,7 +138,6 @@ class CustomVAE(nn.Module):
         self.convInit = get_conv_layer(spatial_dims, in_channels, init_filters) # (B, C_out, D, H, W)
         self.down_layers = self._make_down_layers()
         self.up_layers, self.up_samples = self._make_up_layers()
-        self.conv_final = self._make_final_conv(self.out_channels)
 
         if self.spatial_dims == 2:
             self.attn_layer = SelfAttentionND(
@@ -365,14 +364,14 @@ class CustomVAE(nn.Module):
         
         return x_vae
 
-    def sample(self, z_mean, z_sigma, eps=None):
+    def sample(self, z_mean, z_std, eps=None):
         """
         This function samples a z given a mean and sigma. It can be used with 
         presampled noise or if None, it will sample the noise.
         """
         if eps is None:
-            eps = torch.randn_like(z_sigma)
-        x_vae = z_mean + z_sigma * eps
+            eps = torch.randn_like(z_std)
+        x_vae = z_mean + z_std * eps
         return x_vae
     
 

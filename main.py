@@ -42,10 +42,10 @@ if __name__ == "__main__":
     # CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=K main.py
     # CUDA_VISIBLE_DEVICES=2,3,4,5 torchrun --nproc_per_node=4 main.py
 
-    check_feasibility = False
-    train_model = True
+    check_feasibility = True
+    train_model = False
     # Don't run eval and train in the same run for DDP
-    eval_model_bool = False
+    eval_model_bool = True
     eval_model_checkpoint = "./saved_models/patch_test.pt"
     train_wandb_name = "test_run"
     eval_wandb_name = "test_run"

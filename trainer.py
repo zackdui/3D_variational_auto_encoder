@@ -296,7 +296,6 @@ class Trainer:
                                     "train/window_avg_loss": window_avg,
                                     "train/global_step": self.global_step,
                                 },
-                                step=self.global_step,
                             )
 
                         if window_avg < self.best_train_loss:
