@@ -32,7 +32,7 @@ import numpy as np
 import torch
 
 from .type_definitions import NdarrayOrTensor, NdarrayTensor, PathLike
-from model_utils.utils.module import optional_import, version_leq
+from .module import optional_import, version_leq
 
 
 if TYPE_CHECKING:

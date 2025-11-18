@@ -15,8 +15,8 @@ from typing import Optional
 
 import torch.nn
 
-from model_utils.layers.factories import Act, Dropout, Norm, Pool, RelPosEmbedding, split_args
-from model_utils.utils import has_option # Nees dealing with
+from ..layers.factories import Act, Dropout, Norm, Pool, RelPosEmbedding, split_args
+from ..utils import has_option # Nees dealing with
 
 __all__ = ["get_norm_layer", "get_act_layer", "get_dropout_layer", "get_pool_layer"]
 

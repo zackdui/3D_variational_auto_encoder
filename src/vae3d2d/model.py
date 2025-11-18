@@ -30,11 +30,11 @@ from typing import Optional, Tuple
 import os
 import dataclasses
 
-from model_utils.blocks.segresnet_block import ResBlock, get_conv_layer, get_upsample_layer
-from model_utils.layers.factories import Dropout
-from model_utils.layers.utils import get_act_layer, get_norm_layer
-from model_utils.utils import UpsampleMode
-from model_utils.blocks import SelfAttentionND
+from .model_utils.blocks.segresnet_block import ResBlock, get_conv_layer, get_upsample_layer
+from .model_utils.layers.factories import Dropout
+from .model_utils.layers.utils import get_act_layer, get_norm_layer
+from .model_utils.utils import UpsampleMode
+from .model_utils.blocks import SelfAttentionND
 
 
 __all__ = ["CustomVAE", "AttnParams"]

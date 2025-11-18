@@ -19,8 +19,8 @@ import torch.nn as nn
 
 # from networks.blocks import ADN
 from .acti_norm import ADN
-from model_utils.layers.convutils import same_padding, stride_minus_kernel_padding
-from model_utils.layers.factories import Conv
+from ..layers.convutils import same_padding, stride_minus_kernel_padding
+from ..layers.factories import Conv
 
 
 class Convolution(nn.Sequential):

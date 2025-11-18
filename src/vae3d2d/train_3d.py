@@ -8,9 +8,9 @@ import logging
 import wandb
 import time
 
-from model import CustomVAE
-from trainer import Trainer
-from dataloaders import RandomPatch3DDataset, AllPatch3DDataset, RandomVolumeDataset
+from .model import CustomVAE
+from .trainer import Trainer
+from .dataloaders import RandomPatch3DDataset, AllPatch3DDataset, RandomVolumeDataset
 
 
 def training_3D(model: CustomVAE,

@@ -67,8 +67,8 @@ from typing import Any
 
 import torch.nn as nn
 
-from model_utils.utils2 import has_nvfuser_instance_norm
-from model_utils.utils import ComponentStore, look_up_option, optional_import
+from ..utils2 import has_nvfuser_instance_norm
+from ..utils import ComponentStore, look_up_option, optional_import
 
 __all__ = ["LayerFactory", "Dropout", "Norm", "Act", "Conv", "Pool", "Pad", "RelPosEmbedding", "split_args"]
 

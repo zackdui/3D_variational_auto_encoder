@@ -8,7 +8,7 @@ import logging
 import wandb
 import time
 
-from evaluation import evaluate_model_on_full_volumes
+from .evaluation import evaluate_model_on_full_volumes
 
 def eval_model_3D(model, 
                dataset, 

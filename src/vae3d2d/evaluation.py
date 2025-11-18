@@ -9,7 +9,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from image_utils import (reconstruct_volume, 
+from .image_utils import (reconstruct_volume, 
                          safe_delete, 
                          save_gif, 
                          save_side_by_side_slices, 

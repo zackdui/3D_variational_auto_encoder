@@ -1,0 +1,17 @@
+# Torch myst be installed separetly on each machine so that requirements can 
+# be compatible with different CUDA versions
+# torch
+numpy
+wandb
+tqdm
+imageio[ffmpeg]
+pillow
+
+
+
+
+
+
+
+
+

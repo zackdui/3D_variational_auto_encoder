@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import torch.nn as nn
 
-from model_utils.blocks.convolutions import Convolution
-from model_utils.blocks.upsample import UpSample
-from model_utils.layers.utils import get_act_layer, get_norm_layer
-from model_utils.utils import InterpolateMode, UpsampleMode
+from ..blocks.convolutions import Convolution
+from ..blocks.upsample import UpSample
+from ..layers.utils import get_act_layer, get_norm_layer
+from ..utils import InterpolateMode, UpsampleMode
 
 
 def get_conv_layer(

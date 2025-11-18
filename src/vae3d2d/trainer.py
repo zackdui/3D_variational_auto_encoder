@@ -11,7 +11,7 @@ import numpy as np
 from pathlib import Path
 import os
 
-from image_utils import safe_delete, prepare_for_wandb, volume_to_gif_frames, save_gif, save_mp4
+from .image_utils import safe_delete, prepare_for_wandb, volume_to_gif_frames, save_gif, save_mp4
 
 class Trainer:
     def __init__(

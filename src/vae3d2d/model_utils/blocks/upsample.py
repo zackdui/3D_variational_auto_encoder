@@ -16,9 +16,9 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 
-from model_utils.layers.factories import Conv, Pad, Pool
-from model_utils.utils2 import icnr_init, pixelshuffle
-from model_utils.utils import InterpolateMode, UpsampleMode, ensure_tuple_rep, look_up_option
+from ..layers.factories import Conv, Pad, Pool
+from ..utils2 import icnr_init, pixelshuffle
+from ..utils import InterpolateMode, UpsampleMode, ensure_tuple_rep, look_up_option
 
 __all__ = ["Upsample", "UpSample", "SubpixelUpsample", "Subpixelupsample", "SubpixelUpSample"]
 

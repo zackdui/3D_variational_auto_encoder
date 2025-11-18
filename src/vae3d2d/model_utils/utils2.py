@@ -25,7 +25,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from model_utils.utils.module import optional_import
+from .utils.module import optional_import
 
 onnx, _ = optional_import("onnx")
 onnxreference, _ = optional_import("onnx.reference")

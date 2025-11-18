@@ -14,7 +14,7 @@ from .image_utils import (safe_delete,
                           volume_to_gif_frames)
 from .eval_3d import eval_model_3D
 from .train_3d import training_3D
-from .main import setup_logger
+from .logger_utils import setup_logger
 from . import model_utils
 
 
@@ -35,7 +35,8 @@ __all__ = ["CustomVAE",
            "volume_to_gif_frames",
            "save_gif",
            "save_mp4",
-           "volume_to_gif_frames",
            "eval_model_3D",
            "training_3D",
            "setup_logger"]
+
+__version__ = "0.1.0"
