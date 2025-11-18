@@ -7,65 +7,11 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import logging
 import wandb
-import tempfile
-import imageio.v2 as imageio
 import numpy as np
+from pathlib import Path
 import os
 
 from image_utils import safe_delete, prepare_for_wandb, volume_to_gif_frames, save_gif, save_mp4
-
-# def safe_delete(path):
-#     try:
-#         os.remove(path)
-#     except OSError:
-#         pass
-
-# def prepare_for_wandb(slice_2d):
-#     """
-#     slice_2d: torch.Tensor or np.ndarray, shape (H, W) or (1, H, W)
-#               values expected in [-1, 1]
-#     returns: np.ndarray uint8, shape (H, W)
-#     """
-#     if hasattr(slice_2d, "detach"):  # torch.Tensor
-#         slice_2d = slice_2d.detach().cpu().numpy()
-
-#     slice_2d = np.squeeze(slice_2d)          # drop channel if (1, H, W)
-#     slice_2d = np.clip(slice_2d, -1.0, 1.0)  # enforce range
-#     slice_2d = (slice_2d + 1.0) / 2.0        # [-1,1] -> [0,1]
-#     slice_2d = (slice_2d * 255.0).round().astype("uint8")
-#     return slice_2d
-
-# def volume_to_gif_frames(volume_3d, every_n: int = 1):
-#     """
-#     volume_3d: torch.Tensor or np.ndarray, shape (D, H, W)
-#                values in [-1, 1]
-#     every_n: use every n-th slice to keep GIF small
-#     returns: list of uint8 (H, W) frames
-#     """
-#     if hasattr(volume_3d, "detach"):
-#         volume_3d = volume_3d.detach().cpu().numpy()
-#     D = volume_3d.shape[0]
-#     frames = []
-#     for d in range(0, D, every_n):
-#         frame = prepare_for_wandb(volume_3d[d])
-#         frames.append(frame)
-#     return frames
-
-# def save_gif(frames, fps: int = 10) -> str:
-#     """
-#     frames: list of (H, W) or (H, W, 3) uint8 arrays
-#     returns: path to a temporary .gif file
-#     """
-#     tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
-#     tmp.close()
-#     imageio.mimsave(tmp.name, frames, fps=fps)
-#     return tmp.name
-
-# def save_mp4(frames, fps=10):
-#     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-#     tmp.close()
-#     imageio.mimsave(tmp.name, frames, fps=fps)  # imageio automatically picks mp4 writer
-#     return tmp.name
 
 class Trainer:
     def __init__(
@@ -80,17 +26,85 @@ class Trainer:
         use_grad_scaler: bool | None = None,
         logger: logging.Logger | None = None,
         use_wandb: bool = False,
+        checkpoint_dir: str | Path = "./checkpoints",
+        save_every_steps: int | None = None,
+        best_check_every_steps: int | None = None,
     ):
         """
-        model: your VAE; in train mode forward returns (out, loss),
-               in eval mode returns out only.
-        optimizer: an *instance* of torch.optim.Optimizer (e.g. AdamW(...))
-        device: torch.device or string, e.g. 'cuda:0'
-        accum_steps: gradient accumulation steps. If >1, will accumulate gradients
-        is_main_process: set False for non-zero ranks in DDP so only rank 0 prints/logs
-        use_amp: whether to enable mixed-precision training
-        amp_dtype: torch.float16 (works on V100 + A6000 + A100) or torch.bfloat16 (A6000 and A100 only)
-        use_grad_scaler: if None, auto-choose (True for fp16, False otherwise)
+        Initialize a Trainer for 3D VAE training with support for gradient
+        accumulation, mixed precision, checkpointing, and optional distributed
+        operation.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            The model being trained.  
+            - In **train mode**, `model(x)` must return `(output, loss)`.  
+            - In **eval mode**, `model(x)` must return `output` only.
+
+        optimizer : torch.optim.Optimizer
+            An instantiated optimizer (e.g., `torch.optim.AdamW(model.parameters(), ...)`).
+
+        device : torch.device or str, optional
+            Device used for training (e.g., `"cuda"`, `"cuda:0"`, `"cpu"`). If None,
+            uses the model's current device.
+
+        accum_steps : int, default=1
+            Number of gradient accumulation steps.  
+            Backprop is called every batch, but the optimizer updates parameters
+            only after `accum_steps` backward passes.
+
+        is_main_process : bool, default=True
+            Whether this process is the “main” (rank 0) process.  
+            Only rank 0 performs logging, printing, checkpointing, and W&B logging.
+
+        use_amp : bool, default=False
+            Enable automatic mixed precision (AMP) for the forward/backward pass.
+
+        amp_dtype : torch.dtype, default=torch.float16
+            Precision used inside the AMP autocast context.  
+            - `torch.float16`: supported on most GPUs (V100, A6000, A100, etc.)  
+            - `torch.bfloat16`: recommended on A6000/A100-class hardware
+
+        use_grad_scaler : bool or None, default=None
+            Whether to use `torch.cuda.GradScaler`.  
+            - If `None`: automatically chosen (`True` when using float16 AMP).  
+            - For bfloat16 AMP, this is typically set to `False`.
+
+        logger : logging.Logger or None, default=None
+            Optional Python logger for progress and debug messages.
+
+        use_wandb : bool, default=False
+            Whether to log training metrics, losses, and optional reconstructions
+            to Weights & Biases. Only the main process logs when running under DDP.
+
+        checkpoint_dir : str or Path, default="./checkpoints"
+            Directory where periodic and best-model checkpoints will be stored.
+
+        save_every_steps : int or None, default=None
+            Save a checkpoint every N optimizer **steps**.  
+            If None, periodic checkpoints are disabled.
+
+        best_check_every_steps : int or None, default=None
+            Validate and update the “best” model every N steps.  
+            If None, best-checkpoint evaluation is disabled.
+
+        Notes
+        -----
+        **Definition of a “step”**  
+        A *step* means one optimizer update:
+
+        - **Single GPU (non-DDP):**  
+        One step occurs every `accum_steps` batches  
+        → effectively `accum_steps × batch_size` samples per optimizer update.
+
+        - **DDP (multi-GPU):**  
+        Every GPU processes `accum_steps` batches before a synchronized update:  
+        → `accum_steps × batch_size_per_gpu × world_size` total samples contribute  
+            to one optimizer update.
+
+        This ensures consistent semantics across distributed training.
+
         """
         self.model = model
         self.optimizer = optimizer              # must be an instance, not a class
@@ -127,6 +141,23 @@ class Trainer:
 
         self.use_wandb = use_wandb and self.is_main_process
 
+        # --- Checkpointing setup ---
+        
+        self.checkpoint_dir = checkpoint_dir
+        if self.is_main_process:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # How often to save within an epoch (in optimizer steps); None disables
+        self.save_every_steps = save_every_steps
+        self.best_check_every_steps = best_check_every_steps
+
+        # Track global optimizer steps (not batches)
+        self.global_step = 0
+
+        # Best validation loss so far (for "best model" saving)
+        self.best_val_loss = float("inf")
+        self.best_train_loss = float("inf")
+
     def ddp_average(self, value: torch.Tensor) -> float:
         """
         All-reduce & average a scalar tensor across all processes.
@@ -137,6 +168,22 @@ class Trainer:
         value /= dist.get_world_size()
         return value.item()
     
+    def save_model(self, filename: str):
+        """
+        Save the model using its built-in `save_checkpoint` method.
+        Handles DDP vs non-DDP and only runs on main process.
+        """
+        if not self.is_main_process:
+            return
+        full_path = os.path.join(self.checkpoint_dir, filename)
+
+        if self.is_distributed:
+            self.model.module.save_checkpoint(save_dir=self.checkpoint_dir, filename=filename)
+        else:
+            self.model.save_checkpoint(save_dir=self.checkpoint_dir, filename=filename)
+
+        self.logger.info("Saved model checkpoint to %s", full_path)
+
     def train_epoch(self, dataloader, epoch: int | None = None, num_epochs: int | None = None):
         self.model.train()
         self.optimizer.zero_grad()
@@ -146,6 +193,8 @@ class Trainer:
 
         running_loss = 0.0
         num_batches = 0
+        window_loss_sum = 0.0
+        window_loss_count = 0
 
         # tqdm over the dataloader, only on main process
         desc = "Train"
@@ -184,6 +233,9 @@ class Trainer:
 
             running_loss += loss.item()
             num_batches += 1
+            window_loss_sum += loss.item()
+            window_loss_count += 1
+            
 
             # optimizer step when we've accumulated enough grads
             if ((step + 1) % self.accum_steps == 0) or (step + 1 == len(dataloader)):
@@ -193,6 +245,67 @@ class Trainer:
                 else:
                     self.optimizer.step()
                 self.optimizer.zero_grad()
+
+                # --- increment global step after each optimizer step ---
+                self.global_step += 1
+
+                # --- save model every N optimizer steps ---
+                if (
+                    self.save_every_steps is not None
+                    and self.global_step % self.save_every_steps == 0
+                    and self.is_main_process
+                ):
+                    # name it however you like; .pt or .ckpt etc.
+                    self.save_model(filename=f"step_{self.global_step}.pt")
+
+                # --- check window-averaged loss every best_check_every_steps ---
+                if (
+                    self.best_check_every_steps is not None
+                    and self.global_step % self.best_check_every_steps == 0
+                    and window_loss_count > 0
+                ):
+                    # compute global window average across all ranks (if DDP)
+                    if self.is_distributed:
+                        # pack [sum, count] into a tensor on the correct device
+                        stats = torch.tensor(
+                            [window_loss_sum, float(window_loss_count)],
+                            device=self.device,
+                            dtype=torch.float32,
+                        )
+                        # all_reduce with SUM so we get global totals
+                        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+                        total_loss_sum, total_count = stats.tolist()
+                        window_avg = total_loss_sum / max(total_count, 1.0)
+                    else:
+                        # single-process case
+                        window_avg = window_loss_sum / window_loss_count
+
+                    # only main process updates best + saves
+                    if self.is_main_process:
+                        # ---- log to standard logger ----
+                        self.logger.info(
+                            "Global step %d: window-avg train loss = %.6f",
+                            self.global_step,
+                            window_avg,
+                        )
+
+                        # ---- log to Weights & Biases ----
+                        if self.use_wandb:
+                            wandb.log(
+                                {
+                                    "train/window_avg_loss": window_avg,
+                                    "train/global_step": self.global_step,
+                                },
+                                step=self.global_step,
+                            )
+
+                        if window_avg < self.best_train_loss:
+                            self.best_train_loss = window_avg
+                            self.save_model(filename="best_train_window.pt")
+
+                    # reset window stats after each check
+                    window_loss_sum = 0.0
+                    window_loss_count = 0
 
             # update tqdm postfix with current (unscaled) loss
             if self.is_main_process:
@@ -346,6 +459,11 @@ class Trainer:
                                         "[Epoch %d/%d] global_avg_val_recon_loss = %.4f",
                                         epoch + 1, num_epochs, eval_loss,
                                     )
+                    # --- save best model so far (based on validation loss) ---
+                    if eval_loss is not None and eval_loss < self.best_val_loss:
+                        self.best_val_loss = eval_loss
+                        # you can include epoch in the name if you like
+                        self.save_model(filename="best_eval_model.pt")
                     
             if self.use_wandb and self.is_main_process:
                 log_dict = {

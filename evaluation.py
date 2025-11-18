@@ -34,18 +34,80 @@ def evaluate_model_on_full_volumes(
     use_wandb: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """
-    Evaluate a single model on a test set of full 3D volumes.
+    Evaluate a 3D reconstruction model over an entire dataset of full volumes.
 
-    - Supports "full" and "patch" modes.
-    - Optionally saves ONE example volume where each 2D slice is
-      [original | reconstructed] as a .pt tensor.
-    - use_blending if in patch mode this will use blending when reconstructing the full image
+    This function iterates through a dataloader of 3D volumes, runs inference 
+    using either full-volume mode or patch-based reconstruction, computes 
+    per-volume and aggregated MSE metrics, and optionally saves a single
+    example reconstruction for qualitative inspection.
 
-    Returns:
-        {
-            "per_volume_mse": tensor (N_volumes_local,)  # per-process if DDP
-            "mean_mse": scalar tensor                   # global mean if DDP
-        }
+    It is designed to run in both single-process and DistributedDataParallel (DDP)
+    settings. In DDP, metrics are aggregated across processes, while example
+    saving and optional W&B logging are performed only on rank 0.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The trained 3D model to evaluate. Must accept tensors of shape
+        (B, C, D, H, W) and return tensors of the same shape.
+
+    mode : {"full", "patch"}
+        Evaluation mode:
+        - "full": run inference on the entire volume in a single forward pass.
+        - "patch": extract sliding-window patches, run inference on each, and
+          stitch the outputs back together using `patch_size` and `stride`.
+
+    dataloader : torch.utils.data.DataLoader
+        Yields full 3D volumes. Each batch should have shape (1, C, D, H, W).
+
+    patch_size : tuple[int, int, int], optional
+        Size of 3D patches `(D, H, W)` for patch-based inference.
+
+    stride : tuple[int, int, int], optional
+        Sliding-window stride for patch extraction in patch mode.
+
+    use_blending : bool, default=True
+        If True, apply a smooth blending window (e.g., Hann) to overlapping
+        patches during reconstruction. If False, overlaps are averaged.
+
+    device : torch.device, optional
+        Device on which evaluation is performed. If None, uses the model’s
+        current device.
+
+    save_example_dir : str or None, default=None
+        If provided, saves **one** example volume (determined by
+        `example_volume_index`) containing a tensor of shape
+        `(C, D, H, W, 2)` where each slice is:
+        `[original | reconstructed]`.
+
+    example_volume_index : int, default=0
+        Index (in dataset order) of the volume to save as an example.
+
+    logger : logging.Logger or None, default=None
+        Optional logger for progress updates and debugging messages.
+
+    use_wandb : bool, default=False
+        If True, logs the example volume and scalar metrics to Weights & Biases.
+        Only executed by rank 0 when using DDP.
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+        
+        - **"per_volume_mse"** : torch.Tensor (N_local,)
+              Per-volume MSE computed on the subset of data handled by the local
+              process (under DDP); contains all volumes in single-process mode.
+
+        - **"mean_mse"** : torch.Tensor (scalar)
+              Global mean MSE aggregated across all processes (if DDP).
+
+    Notes
+    -----
+    - The caller must set `model.eval()` before calling this function.
+    - In patch mode, `patch_size` and `stride` must be supplied.
+    - Only rank 0 performs saving and W&B logging.
+    - This function operates under `torch.no_grad()` to reduce memory usage.
     """
     logger = logger or logging.getLogger(__name__)
     # DDP detection

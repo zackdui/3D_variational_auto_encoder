@@ -32,11 +32,116 @@ def training_3D(model: CustomVAE,
                 use_grad_scaler=False,
                 logger: logging.Logger | None =None,
                 use_wandb=False,
-                wandb_run_name="run01",):
+                wandb_run_name="run01",
+                checkpoint_dir="./checkpoints",
+                save_every_steps=500,
+                best_check_every_steps=100):
     """
-    This function works for ddp initialization and non-ddp initialization
-    base_dataset: Should be a dataset that just returns volume
-    patching: Can be "full" or "random_parts"
+    Train a 3D VAE model on full volumes or randomly sampled 3D patches.
+
+    This function handles dataset splitting, dataloader construction, optimizer
+    setup, automatic mixed precision (AMP), gradient accumulation, checkpointing,
+    and optional W&B logging. It supports both single-process and DDP training.
+    Training can be done either on full volumes or on randomly sampled patches
+    extracted from each volume.
+
+    Parameters
+    ----------
+    model : CustomVAE
+        The model to train. Must return `(reconstruction, loss)` during the
+        forward pass.
+
+    base_dataset : torch.utils.data.Dataset
+        A dataset returning full 3D volumes of shape (C, D, H, W) or a dict
+        containing such a tensor.
+
+    optimizer_cls : torch.optim.Optimizer, default=torch.optim.AdamW
+        Optimizer class used for training.
+
+    optimizer_kwargs : dict or None, default=None
+        Keyword arguments passed to the optimizer class.
+
+    accum_steps : int, default=1
+        Number of gradient accumulation steps. Effective batch size is
+        `train_batch * accum_steps`.
+
+    epochs : int, default=10
+        Number of full training epochs.
+
+    patching : {"full", "random_parts", None}, default=None
+        How the input volumes are provided to the model:
+        - "full": full-volume training.
+        - "random_parts": sample patches of size `patch_size` from each volume.
+        - None: same as "full".
+
+    train_split : float, default=0.9
+        Fraction of dataset used for training; remainder is validation.
+
+    patch_size : tuple[int, int, int], default=(32, 128, 128)
+        Patch size `(D, H, W)` used when `patching="random_parts"`.
+
+    patches_per_volume : int, default=4
+        Number of random patches drawn per volume per epoch in patching mode. Only used if `patching="random_parts"`.
+
+    train_batch : int, default=1
+        Batch size for the training dataloader.
+
+    val_batch : int, default=1
+        Batch size for the validation dataloader.
+
+    num_workers : int, default=0
+        Number of dataloader worker processes.
+
+    model_file_name : str, default="model.pt"
+        Filename for the final saved model.
+
+    use_amp : bool, default=False
+        Enable automatic mixed precision training.
+
+    amp_dtype : torch.dtype, default=torch.bfloat16
+        AMP dtype to use (recommended: bfloat16 on newer GPUs).
+
+    use_grad_scaler : bool, default=False
+        Whether to apply `torch.cuda.GradScaler` for stable float16 training.
+
+    logger : logging.Logger or None, default=None
+        Logger for status messages. If None, a default logger is used.
+
+    use_wandb : bool, default=False
+        Enable Weights & Biases logging (only on rank 0 during DDP).
+
+    wandb_run_name : str, default="run01"
+        Name of the W&B run if logging is enabled.
+
+    checkpoint_dir : str, default="./checkpoints"
+        Directory for saving periodic and best model checkpoints.
+
+    save_every_steps : int, default=500
+        Frequency (in steps) for saving normal checkpoints.
+
+    best_check_every_steps : int, default=100
+        Frequency for evaluating validation loss and saving the "best" model.
+
+    Returns
+    -------
+    history : dict
+        Dictionary containing per-epoch loss curves:
+
+        {
+            "train_loss": [float_per_epoch, ...],
+            "val_loss":   [float_per_epoch, ...],
+        }
+
+        These lists grow to length `epochs`.
+
+    Notes
+    -----
+    - DDP initialization happens inside this function if environment variables
+      indicate a distributed launch.
+    - Only rank 0 writes checkpoints and logs to W&B.
+    - Patch sampling occurs every epoch, giving the model new subvolumes each
+      time.
+    - AMP + gradient scaling (if enabled) can significantly reduce memory usage.
     """
     logger = logger or logging.getLogger(__name__)
 
@@ -59,6 +164,7 @@ def training_3D(model: CustomVAE,
         "use_amp": use_amp,
         "amp_dtype": str(amp_dtype).replace("torch.", ""),
         "use_grad_scaler": use_grad_scaler,
+        "checkpoint_dir": checkpoint_dir,
         "logger_name": logger.name,
         "num_gpus_visible": torch.cuda.device_count(),
     }
@@ -91,16 +197,6 @@ def training_3D(model: CustomVAE,
             config=hparams,       # logs hyperparameters automatically
         )
         logger.info("Initialized Weights & Biases run: %s", wandb.run.name)
-
-    # DDP Setup
-    # dist.init_process_group(backend="nccl")
-
-    # rank = dist.get_rank()
-    # world_size = dist.get_world_size()
-    # local_rank = int(os.environ["LOCAL_RANK"])
-
-    # torch.cuda.set_device(local_rank)
-    # device = torch.device(f"cuda:{local_rank}")
     
     # Datasets
     train_ds, val_ds = random_split(base_dataset, [train_split, 1 - train_split])
@@ -171,6 +267,9 @@ def training_3D(model: CustomVAE,
         use_grad_scaler=use_grad_scaler,
         logger=logger,
         use_wandb=use_wandb,
+        checkpoint_dir=checkpoint_dir,
+        save_every_steps=save_every_steps,
+        best_check_every_steps=best_check_every_steps,
     )
 
     history = trainer.train(

@@ -22,9 +22,83 @@ def eval_model_3D(model,
                use_wandb=False,
                wandb_run_name="run01",):
     """
-    This function works for ddp initialization and non-ddp initialization
-    
-    mode must be "full" or "patch"
+    Evaluate a 3D reconstruction model on a dataset using either full-volume
+    inference or patch-based inference with optional blending.
+
+    This function works for both DistributedDataParallel (DDP) and
+    single-process (non-DDP) setups. It loads volumes from `dataset`,
+    performs forward passes through `model`, optionally reconstructs the
+    volume from patches, and saves outputs for inspection. Optionally logs
+    metrics and visualizations to Weights & Biases.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The trained 3D model to evaluate. Must accept inputs of shape
+        (B, C, D, H, W) and return a reconstructed volume of the same size.
+
+    dataset : torch.utils.data.Dataset
+        A dataset yielding full 3D volumes. Each item must be a tensor of
+        shape (C, D, H, W) or a dict containing such a tensor.
+
+    batch_size : int, default=1
+        Batch size for evaluation. Full-volume evaluation typically
+        requires batch_size=1 due to memory constraints.
+
+    mode : {"full", "patch"}, default="full"
+        Evaluation mode:
+        - "full": Run the model directly on full 3D volumes.
+        - "patch": Extract overlapping patches of size `patch_size` using
+          the given `stride`, run inference on each patch, and stitch the
+          outputs back together. Useful when the full volume does not fit
+          in GPU memory.
+
+    patch_size : tuple[int, int, int], optional
+        Size of 3D patches `(D, H, W)` when `mode="patch"`. Required if
+        patch mode is used.
+
+    stride : tuple[int, int, int], optional
+        Sliding-window stride for patch extraction. Smaller strides give
+        more overlap at the cost of more compute.
+
+    save_dir : str, default="./test_sample"
+        Directory where reconstructed volumes and optional visualizations
+        (e.g., mid-slice images, GIFs, MP4s) will be written.
+
+    use_blending : bool, default=True
+        If True, overlapping patches are merged using a blending window
+        (e.g., Hann window). If False, patch outputs are simply averaged
+        in overlapping regions.
+
+    logger : logging.Logger or None, default=None
+        Logger for printing progress and debug information. If None, a
+        default module-level logger is created.
+
+    use_wandb : bool, default=False
+        Whether to log evaluation metrics and sample visualizations to
+        Weights & Biases. Only the rank-0 process logs under DDP.
+
+    wandb_run_name : str, default="run01"
+        Name of the W&B run to use when `use_wandb=True`.
+
+    Returns
+    -------
+    dict
+        A dictionary coming from `evaluate_model_on_full_volumes()` with the keys:
+
+        - `"per_volume_mse"` : dict[int, float]
+            Per-volume MSE for the subset of data processed by the local process
+            (if DDP). In single-process mode, contains metrics for all volumes.
+
+        - `"mean_mse"` : float
+            Global mean MSE over *all* volumes (aggregated across processes when
+            using DDP).
+    Notes
+    -----
+    - This function does NOT call `model.eval()` internally; callers
+      should ensure the model is in eval mode.
+    - When running under DDP, only rank 0 performs file I/O and W&B logging.
+    - If `mode="patch"`, both `patch_size` and `stride` must be supplied.
     """
     logger = logger or logging.getLogger(__name__)
 

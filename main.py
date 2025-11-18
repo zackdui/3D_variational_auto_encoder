@@ -43,9 +43,9 @@ if __name__ == "__main__":
     # CUDA_VISIBLE_DEVICES=2,3,4,5 torchrun --nproc_per_node=4 main.py
 
     check_feasibility = False
-    train_model = False
+    train_model = True
     # Don't run eval and train in the same run for DDP
-    eval_model_bool = True
+    eval_model_bool = False
     eval_model_checkpoint = "./saved_models/patch_test.pt"
     train_wandb_name = "test_run"
     eval_wandb_name = "test_run"
@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
     ################# Training Code ##############################
     if train_model:
-        model_name = "no_ddp_test.pt"
+        model_name = "random_test.pt"
         logger_train = setup_logger(name=f"{model_name[:-3]}_logs")
         # Dataset
         base_dataset = RandomVolumeDataset(20, shape=(1, 64, 128, 128))
@@ -87,8 +87,8 @@ if __name__ == "__main__":
         blocks_up=(1,1,1)
         use_attn=True
         attn_params=attn_params1
-        
-        model = CustomVAE(blocks_down=blocks_down, blocks_up=blocks_up, use_attn=use_attn, attn_params=attn_params1)
+
+        model = CustomVAE(vae_use_log_var=True, blocks_down=blocks_down, blocks_up=blocks_up, use_attn=use_attn, attn_params=attn_params1)
         optimizer_cls = torch.optim.AdamW
         
         # Training
@@ -102,7 +102,10 @@ if __name__ == "__main__":
                     model_file_name=model_name,
                     logger=logger_train,
                     use_wandb=True,
-                    wandb_run_name=train_wandb_name)
+                    wandb_run_name=train_wandb_name,
+                    checkpoint_dir=f"{model_name[:-3]}_checkpoints",
+                    save_every_steps=2,
+                    best_check_every_steps=1)
 
     ########################## Evaluation Code #####################
     if eval_model_bool:

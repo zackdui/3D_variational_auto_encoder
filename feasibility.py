@@ -98,37 +98,83 @@ def find_max_batch_size_power2(
     return best
 
 def test_memory(model, use_amp=False):
-        device = "cuda"
+    """
+    Run a controlled forward/backward pass on a 3D model and report GPU memory
+    usage, including peak allocations, to help diagnose memory bottlenecks.
 
-        model.to(device)
-        model.train()
+    This function sends a model to CUDA, constructs a single dummy 3D input
+    tensor of shape (1, 1, 208, 512, 512), and measures memory consumption at
+    multiple points in the forward and backward pass. It optionally evaluates
+    the model under automatic mixed precision (AMP) to compare memory savings.
 
-        # Dummy input
-        x = torch.randn(1, 1, 208, 512, 512, device=device)
+    Parameters
+    ----------
+    model : torch.nn.Module
+        A PyTorch model that, when called as `model(x)`, must return a tuple
+        `(output, loss)` where `loss` is a scalar tensor suitable for
+        `.backward()`.
 
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+    use_amp : bool, default=False
+        If True, the forward pass is executed under `torch.amp.autocast` with
+        `dtype=torch.float16`, allowing measurement of memory savings provided by
+        mixed-precision training. If False, a full-precision forward pass is
+        executed.
 
-        print(f"\n=== Testing use_amp={use_amp} ===")
-        print("Before forward: ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
+    Notes
+    -----
+    - The dummy input tensor has shape `(1, 1, 208, 512, 512)` and is allocated
+    on CUDA. Modify the shape if your model expects different dimensions.
+    - The model is set to training mode (`model.train()`) so that backward pass
+    memory usage is representative of training.
+    - The function resets CUDA peak memory statistics before running.
+    - Memory statistics printed:
+        * **Before forward**: memory after allocating the input & model
+        * **After forward**: memory holding activations for backward
+        * **Peak forward**: peak memory during the forward pass
+        * **After backward**: memory after gradients have been computed
+        * **Peak total**: max GPU memory used during the entire test
+        * **Peak reserved**: the maximum reserved CUDA memory (allocator-level)
+    - All values are printed in megabytes (MB).
+    - This function does not return anything; it only prints memory reports.
 
-        if use_amp:
-            autocast = torch.amp.autocast("cuda", dtype=torch.bfloat16)
-        else:
-            autocast = torch.no_grad()  # no-op context, replaced below
-            autocast.__enter__ = lambda *a, **k: None
-            autocast.__exit__ = lambda *a, **k: None
+    Purpose
+    -------
+    Useful for:
+    - comparing FP32 vs AMP memory usage
+    - checking whether the model fits in GPU memory with a given input size
+    - initial debugging of memory explosions before full training
+    """
+    device = "cuda"
 
-        with torch.amp.autocast("cuda", dtype=torch.float16) if use_amp else torch.autocast("cuda", enabled=False):
-            out, loss = model(x)
+    model.to(device)
+    model.train()
 
-        print("After forward:  ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
-        print("Peak forward:   ", torch.cuda.max_memory_allocated(device) / 1024**2, "MB")
+    # Dummy input
+    x = torch.randn(1, 1, 208, 512, 512, device=device)
 
-        loss.backward()
-        print("After backward: ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
-        print("Peak total:     ", torch.cuda.max_memory_allocated(device) / 1024**2, "MB")
-        print("Peak reserved: ", torch.cuda.max_memory_reserved() / 1024**2, "MB")
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    print(f"\n=== Testing use_amp={use_amp} ===")
+    print("Before forward: ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
+
+    if use_amp:
+        autocast = torch.amp.autocast("cuda", dtype=torch.bfloat16)
+    else:
+        autocast = torch.no_grad()  # no-op context, replaced below
+        autocast.__enter__ = lambda *a, **k: None
+        autocast.__exit__ = lambda *a, **k: None
+
+    with torch.amp.autocast("cuda", dtype=torch.float16) if use_amp else torch.autocast("cuda", enabled=False):
+        out, loss = model(x)
+
+    print("After forward:  ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
+    print("Peak forward:   ", torch.cuda.max_memory_allocated(device) / 1024**2, "MB")
+
+    loss.backward()
+    print("After backward: ", torch.cuda.memory_allocated(device) / 1024**2, "MB")
+    print("Peak total:     ", torch.cuda.max_memory_allocated(device) / 1024**2, "MB")
+    print("Peak reserved: ", torch.cuda.max_memory_reserved() / 1024**2, "MB")
 
 
 

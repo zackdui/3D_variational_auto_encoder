@@ -291,9 +291,10 @@ class CustomVAE(nn.Module):
         # Only in train mode return the loss
         if self.training:
             if self.use_log_var:
-                kl_per_elem = -0.5 * torch.sum(1 + logvar - z_mean.pow(2) - logvar.exp())
+                # kl_per_elem = -0.5 * torch.sum(1 + logvar - z_mean.pow(2) - logvar.exp())
+                kl_elem = -0.5 * (1 + logvar - z_mean.pow(2) - logvar.exp())
                 # flatten all non-batch dims:
-                kl_per_sample = kl_per_elem.view(kl_per_elem.size(0), -1).sum(dim=1)  # (B,)
+                kl_per_sample = kl_elem.view(kl_elem.size(0), -1).sum(dim=1)  # (B,)
                 kl = kl_per_sample.mean()
             else: 
                 var = z_sigma.pow(2)

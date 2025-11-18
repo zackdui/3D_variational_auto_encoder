@@ -8,7 +8,7 @@ class RandomPatch3DDataset(Dataset):
         """
         base_dataset: a Dataset where __getitem__(i) returns a volume (C, D, H, W) or a dict with a volume.
         patch_size: (pd, ph, pw)
-        dataset_length: optional, if you want to repeat volumes mroe times with different random patches
+        dataset_length: optional, if you want to repeat volumes more times with different random patches
             Minimum dataset length is the length of the volumes
         patches_per_volume: Number of patches to return per volume
         """
@@ -150,7 +150,7 @@ class RandomVolumeDataset(Dataset):
     def __init__(self, num_volumes, shape=(1, 208, 512, 512)):
         """
         num_volumes: how many random volumes to generate
-        shape: (C, D, H, W)
+        shape: Any shape is allowed but for this project use (C, D, H, W)
         """
         self.num_volumes = num_volumes
         self.shape = shape
