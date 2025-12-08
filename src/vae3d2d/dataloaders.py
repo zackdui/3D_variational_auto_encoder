@@ -2,9 +2,10 @@
 
 import torch
 from torch.utils.data import Dataset
+from collections import OrderedDict
 
 class RandomPatch3DDataset(Dataset):
-    def __init__(self, base_dataset: Dataset, patch_size, patches_per_volume: int = 1, dataset_length: int | None =None):
+    def __init__(self, base_dataset: Dataset, patch_size, patches_per_volume: int = 1, dataset_length: int | None =None, max_cached_volumes: int | None = 32,):
         """
         base_dataset: a Dataset where __getitem__(i) returns a volume (C, D, H, W) or a dict with a volume.
         patch_size: (pd, ph, pw)
@@ -23,6 +24,9 @@ class RandomPatch3DDataset(Dataset):
             self.dataset_length = max(default_len, dataset_length)
         self.patches_per_volume = patches_per_volume
 
+        self.max_cached_volumes = max_cached_volumes
+        self._volume_cache: OrderedDict[int, torch.Tensor] = OrderedDict()
+
     def __len__(self):
         return self.dataset_length
     
@@ -37,6 +41,31 @@ class RandomPatch3DDataset(Dataset):
             # adjust this key name to match your base dataset
             return item["volume"] if "volume" in item else item["image"]
         raise TypeError(f"Unexpected item type from base_dataset: {type(item)}")
+    
+    def _get_volume(self, vol_idx: int) -> torch.Tensor:
+        """
+        LRU cache over volumes: keeps at most `max_cached_volumes` in memory.
+        Uses _extract_volume so dict vs tensor is handled exactly as before.
+        """
+        cache = self._volume_cache
+
+        if vol_idx in cache:
+            # mark as recently used
+            cache.move_to_end(vol_idx)
+            return cache[vol_idx]
+
+        # Load from base dataset and extract the volume the same way you did before
+        base_item = self.base_dataset[vol_idx]
+        vol = self._extract_volume(base_item)
+
+        if self.max_cached_volumes is not None:
+            if len(cache) >= self.max_cached_volumes:
+                # evict least recently used
+                cache.popitem(last=False)
+            cache[vol_idx] = vol
+
+        return vol
+
 
     def _random_crop_3d(self, vol):
         C, D, H, W = vol.shape
@@ -63,8 +92,7 @@ class RandomPatch3DDataset(Dataset):
         # each volume contributes `patches_per_volume` items
         vol_idx = (idx // self.patches_per_volume) % n_vols
 
-        base_item = self.base_dataset[vol_idx]
-        vol = self._extract_volume(base_item)
+        vol = self._get_volume(vol_idx)
 
         patch = self._random_crop_3d(vol)  # (C, pd, ph, pw)
         return patch

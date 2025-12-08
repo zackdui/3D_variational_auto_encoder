@@ -218,6 +218,8 @@ class Trainer:
             else:
                 out, loss = self.model(x)
 
+            # Don't divide loss by accum_steps yet, need raw loss for logging
+            raw_loss = loss.detach()
             # gradient accumulation
             loss = loss / self.accum_steps
 
@@ -227,24 +229,39 @@ class Trainer:
             else:
                 loss.backward()
 
+            total_grad_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_grad_norm += param_norm.item() ** 2
+            total_grad_norm = total_grad_norm ** 0.5
+            if self.is_main_process:  # rank == 0
+                wandb.log({"train/grad_norm": total_grad_norm})
+
             # out, loss = self.model(x)  # model is in train mode → (out, loss)
             # loss = loss / self.accum_steps
             # loss.backward()
 
-            running_loss += loss.item()
+            running_loss += raw_loss.item()
             num_batches += 1
-            window_loss_sum += loss.item()
+            window_loss_sum += raw_loss.item()
             window_loss_count += 1
             
 
             # optimizer step when we've accumulated enough grads
             if ((step + 1) % self.accum_steps == 0) or (step + 1 == len(dataloader)):
                 if self.use_grad_scaler and self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
+                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
                 self.optimizer.zero_grad()
+
+                if self.is_main_process:
+                    wandb.log({"grad_norm_true": true_grad_norm})
 
                 # --- increment global step after each optimizer step ---
                 self.global_step += 1
@@ -308,7 +325,7 @@ class Trainer:
 
             # update tqdm postfix with current (unscaled) loss
             if self.is_main_process:
-                iterator.set_postfix(loss=float(loss.item()))
+                iterator.set_postfix(loss=float(raw_loss.item()))
 
             # if ((step + 1) % self.accum_steps == 0) or (step + 1 == len(dataloader)):
             #     self.optimizer.step()
@@ -371,6 +388,9 @@ class Trainer:
                 vol_in = x[0, 0]   # (D, H, W)
                 vol_out = out[0, 0]
 
+                # print("input:", vol_in.min().item(), vol_in.max().item())
+                # print("recon:", vol_out.min().item(), vol_out.max().item())
+
                 # ---- 2D middle slice images (what you already had) ----
                 mid = vol_in.shape[0] // 2
                 x_slice = prepare_for_wandb(vol_in[mid])
@@ -381,7 +401,7 @@ class Trainer:
                     "recon/outputs_mid_slice": wandb.Image(out_slice),
                 })
 
-                if epoch % 5 == 0:
+                if True: # epoch % 5 == 0:
                     # ---- 3D scrollable GIF: input volume ----
                     input_frames = volume_to_gif_frames(vol_in, every_n=2)  # every 2 slices, tweak as needed
                     input_gif_path = save_gif(input_frames, fps=10)
@@ -389,29 +409,35 @@ class Trainer:
 
                     # ---- 3D scrollable GIF: side-by-side (input | recon) ----
                     recon_frames = volume_to_gif_frames(vol_out, every_n=2)
+                    output_gif_path = save_gif(recon_frames, fps=10)
+                    output_mp4_path = save_mp4(recon_frames, fps=10)
                     # ensure same length
                     n_frames = min(len(input_frames), len(recon_frames))
                     side_by_side_frames = [
                         np.concatenate([input_frames[i], recon_frames[i]], axis=1)
                         for i in range(n_frames)
                     ]
-                    side_gif_path = save_gif(side_by_side_frames, fps=10)
+                    side_gif_path = save_gif(side_by_side_frames, fps=3)
                     side_mp4_path = save_mp4(side_by_side_frames, fps=10)
 
                     wandb.log({
-                        "recon/volume_scroll_input": wandb.Video(input_gif_path, fps=10, format="gif"),
-                        "recon/volume_scroll_side_by_side": wandb.Video(side_gif_path, fps=10, format="gif"),
+                        "recon/volume_scroll_input": wandb.Video(input_gif_path, format="gif"),
+                        "recon/volume_scroll_side_by_side": wandb.Video(side_gif_path, format="gif"),
+                        "recon/volume_scroll_output": wandb.Video(output_gif_path,format="gif"),
                     })
 
                     wandb.log({
-                        "recon/volume_scroll_input_mp4": wandb.Video(input_mp4_path, fps=10, format="mp4"),
-                        "recon/volume_scroll_side_by_side_mp4": wandb.Video(side_mp4_path, fps=10, format="mp4")
+                        "recon/volume_scroll_input_mp4": wandb.Video(input_mp4_path, format="mp4"),
+                        "recon/volume_scroll_side_by_side_mp4": wandb.Video(side_mp4_path, format="mp4"),
+                        "recon/volume_scroll_output_mp4": wandb.Video(output_mp4_path, format="mp4"),
                     })
 
                     safe_delete(input_gif_path)
                     safe_delete(side_gif_path)
                     safe_delete(input_mp4_path)
                     safe_delete(side_mp4_path)
+                    safe_delete(output_gif_path)
+                    safe_delete(output_mp4_path)
 
         
         loss_average = sum(losses) / max(len(losses), 1)

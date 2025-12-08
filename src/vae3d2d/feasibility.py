@@ -61,8 +61,13 @@ def find_max_batch_size_power2(
 
             if use_amp and device_type == "cuda":
                 scaler.scale(loss).backward()
+                if optimizer is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
             else:
                 loss.backward()
+                if optimizer is not None:
+                    optimizer.step()
 
             if device_type == "cuda":
                 torch.cuda.synchronize()

@@ -10,6 +10,43 @@ import os
 
 EvalMode = Literal["full", "patch"]
 
+def save_gif(frames, fps: int = 10) -> str:
+    """
+    frames: list of (H, W) or (H, W, 3) arrays (torch or np), values already uint8
+    returns: path to a temporary .gif file
+    """
+    # Allow a single frame array/tensor as input
+    if isinstance(frames, (np.ndarray, torch.Tensor)):
+        frames = [frames]
+
+    processed = []
+    for f in frames:
+        # torch -> numpy
+        if isinstance(f, torch.Tensor):
+            f = f.detach().to(torch.float32).cpu().numpy()
+        f = np.asarray(f)
+
+        # Ensure uint8 (you already do this in prepare_for_wandb, so this is just safety)
+        if f.dtype != np.uint8:
+            f = f.astype(np.uint8)
+
+        # Make sure we have HWC for GIF
+        if f.ndim == 2:  # (H, W) grayscale -> RGB
+            f = np.stack([f] * 3, axis=-1)
+        elif f.ndim == 3 and f.shape[0] in (1, 3):  # CHW -> HWC
+            f = np.moveaxis(f, 0, -1)
+        # if (H, W, 3) already, we’re good
+
+        processed.append(f)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+    tmp.close()
+
+    # GIF writer tends to behave better with duration than fps
+    duration = 1.0 / fps
+    imageio.mimsave(tmp.name, processed, format="GIF", duration=duration, loop=0)
+    return tmp.name
+
 def safe_delete(path):
     try:
         os.remove(path)
@@ -23,7 +60,7 @@ def prepare_for_wandb(slice_2d):
     returns: np.ndarray uint8, shape (H, W)
     """
     if hasattr(slice_2d, "detach"):  # torch.Tensor
-        slice_2d = slice_2d.detach().cpu().numpy()
+        slice_2d = slice_2d.detach().to(torch.float32).cpu().numpy()
 
     slice_2d = np.squeeze(slice_2d)          # drop channel if (1, H, W)
     slice_2d = np.clip(slice_2d, -1.0, 1.0)  # enforce range
@@ -39,23 +76,13 @@ def volume_to_gif_frames(volume_3d, every_n: int = 1):
     returns: list of uint8 (H, W) frames
     """
     if hasattr(volume_3d, "detach"):
-        volume_3d = volume_3d.detach().cpu().numpy()
+        volume_3d = volume_3d.detach().to(torch.float32).cpu().numpy()
     D = volume_3d.shape[0]
     frames = []
     for d in range(0, D, every_n):
         frame = prepare_for_wandb(volume_3d[d])
         frames.append(frame)
     return frames
-
-def save_gif(frames, fps: int = 10) -> str:
-    """
-    frames: list of (H, W) or (H, W, 3) uint8 arrays
-    returns: path to a temporary .gif file
-    """
-    tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
-    tmp.close()
-    imageio.mimsave(tmp.name, frames, fps=fps)
-    return tmp.name
 
 def save_mp4(frames, fps=10):
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)

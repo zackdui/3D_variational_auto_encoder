@@ -6,6 +6,7 @@ wandb
 tqdm
 imageio[ffmpeg]
 pillow
+monai
 
 
 
