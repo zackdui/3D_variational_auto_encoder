@@ -34,6 +34,7 @@ def training_3D(model: CustomVAE,
                 use_wandb=False,
                 wandb_run_name="run01",
                 checkpoint_dir="./checkpoints",
+                final_save_dir=None,
                 save_every_steps=500,
                 best_check_every_steps=100):
     """
@@ -116,6 +117,9 @@ def training_3D(model: CustomVAE,
     checkpoint_dir : str, default="./checkpoints"
         Directory for saving periodic and best model checkpoints.
 
+    final_save_dir : str or None, default=None
+        If given, the final model checkpoint is also saved to this directory.
+
     save_every_steps : int, default=500
         Frequency (in steps) for saving normal checkpoints.
 
@@ -144,6 +148,7 @@ def training_3D(model: CustomVAE,
     - AMP + gradient scaling (if enabled) can significantly reduce memory usage.
     """
     logger = logger or logging.getLogger(__name__)
+    print("Here Starting VAE Training in Local version")
 
     hparams = {
         "model_class": f"{model.__class__.__module__}.{model.__class__.__name__}",
@@ -165,6 +170,7 @@ def training_3D(model: CustomVAE,
         "amp_dtype": str(amp_dtype).replace("torch.", ""),
         "use_grad_scaler": use_grad_scaler,
         "checkpoint_dir": checkpoint_dir,
+        "final_save_dir": final_save_dir,
         "logger_name": logger.name,
         "num_gpus_visible": torch.cuda.device_count(),
     }
@@ -282,9 +288,9 @@ def training_3D(model: CustomVAE,
     if rank == 0:
         logger.info("Training finished.")
         if is_distributed:
-            model.module.save_checkpoint(filename=model_file_name)
+            model.module.save_checkpoint(filename=model_file_name, save_dir=final_save_dir)
         else:
-            model.save_checkpoint(filename=model_file_name)
+            model.save_checkpoint(filename=model_file_name, save_dir=final_save_dir)
 
         logger.info(f"Model saved to {model_file_name}")
         wandb.finish()
