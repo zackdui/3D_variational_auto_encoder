@@ -22,3 +22,4 @@ from .acti_norm import ADN
 from .convolutions import Convolution
 from .upsample import Upsample
 from .attention_module import SelfAttentionND
+from .upsample_new import DecoderUpsampleBlock3D_MONAI

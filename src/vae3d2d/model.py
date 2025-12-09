@@ -29,15 +29,20 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 import os
 import dataclasses
+from monai.losses import SSIMLoss
 
 from .model_utils.blocks.segresnet_block import ResBlock, get_conv_layer, get_upsample_layer
 from .model_utils.layers.factories import Dropout
 from .model_utils.layers.utils import get_act_layer, get_norm_layer
 from .model_utils.utils import UpsampleMode
 from .model_utils.blocks import SelfAttentionND
+from .model_utils.blocks.upsample_new import DecoderUpsampleBlock3D_MONAI
+from .loss_functions import Eagle_Loss_3D, gradient_loss
+
 
 
 __all__ = ["CustomVAE", "AttnParams"]
+
 
 @dataclass
 class AttnParams:
@@ -51,6 +56,23 @@ class AttnParams:
     window_size: Optional[Tuple[int, ...]] = None 
     use_rel_pos_bias: Optional[bool] = None
 
+loss_strings_to_classes = {
+    "ssim_3d": SSIMLoss(spatial_dims=3, data_range=2.0),
+    "eagle_loss_3d": Eagle_Loss_3D(patch_size=3, cpu=False, cutoff=0.5),
+    "gradient_loss_3d": gradient_loss,
+    'mse': nn.MSELoss(reduction='none'),
+    'l1': nn.L1Loss(reduction='none'),
+}
+
+ACTIVATION_REGISTRY = {
+    "relu": nn.ReLU,
+    "leaky_relu": nn.LeakyReLU,
+    "gelu": nn.GELU,
+    "sigmoid": nn.Sigmoid,
+    "tanh": nn.Tanh,
+    "elu": nn.ELU,
+    "softplus": nn.Softplus,
+}
 
 class CustomVAE(nn.Module):
     """
@@ -69,19 +91,29 @@ class CustomVAE(nn.Module):
         beta: In vae loss what beta to apply
         spatial_dims: spatial dimension of the input data. Defaults to 3.
         init_filters: number of output channels for initial convolution layer. Defaults to 8.
+        smallest_filters: number of channels at the bottleneck of the VAE before latent channels. Defaults to 64.
         in_channels: number of input channels for the network. Defaults to 1.
         dropout_prob: probability of an element to be zero-ed. Defaults to ``None``.
         act: activation type and arguments. Defaults to ``RELU``.
         norm: feature normalization type and arguments. Defaults to ``GROUP``.
+        custom_losses: A list of loss functions to add to the total loss
+            - Each loss function should take in (input, target) and return a tensor loss
+            - Each loss is a string key from loss_strings_to_classes which maps to a loss function
+            - valid strings are: 'ssim_3d', 'eagle_loss_3d', 'gradient_loss_3d', 'mse', 'l1'
+            - defaults to ['l1']
+        custom_loss_weights: A list of weights for each custom loss function
+        final_activation: Final activation to apply to the output. Defaults to "tanh". Should be a string key from ACTIVATION_REGISTRY or None for no activation.
+            - Valid strings are: 'relu', 'leaky_relu', 'gelu',  'sigmoid', 'tanh', 'elu', 'softplus'
         blocks_down: number of down sample blocks in each layer. Defaults to ``[1,2,2,4]``.
         blocks_up: number of up sample blocks in each layer. Defaults to ``[1,1,1]``. Must have one number less than blocks down
-        upsample_mode: [``"deconv"``, ``"nontrainable"``, ``"pixelshuffle"``]
+        upsample_mode: [``"deconv"``, ``"nontrainable"``, ``"pixelshuffle"``, ``"pixelshuffle_v2"``]
             The mode of upsampling manipulations.
             Using the ``nontrainable`` modes cannot guarantee the model's reproducibility. Defaults to``nontrainable``.
 
             - ``deconv``, uses transposed convolution layers.
             - ``nontrainable``, uses non-trainable `linear` interpolation.
             - ``pixelshuffle``, uses :py:class:`monai.networks.blocks.SubpixelUpsample`.
+            - ``pixelshuffle_v2``, uses :py:class:`DecoderUpsampleBlock3D_MONAI`.
         use_attn: Whether to add an attention layer before producing mean and variance. Defaults to False
         attn_params: takes in AttnParams; the parameters for the attention layer if it is used
             window_size = None is for global attention
@@ -95,20 +127,25 @@ class CustomVAE(nn.Module):
         beta: float = 1.0,
         spatial_dims: int = 3,
         init_filters: int = 8,
+        smallest_filters: int = 64,
         in_channels: int = 1,
         dropout_prob: float | None = None,
         act: str | tuple = ("RELU", {"inplace": True}),
         norm: tuple | str = ("GROUP", {"num_groups": 8}),
         norm_name: str = "",
         num_groups: int = 8,
+        custom_losses = None,
+        custom_loss_weights = None,
         blocks_down: tuple = (1, 2, 2, 4),
         blocks_up: tuple = (1, 1, 1),
+        final_activation: Optional[str] = "tanh",
         upsample_mode: UpsampleMode | str = UpsampleMode.NONTRAINABLE,
         use_attn: bool = False,
         attn_params: AttnParams = AttnParams(),
         debug_mode: bool = False,
     ):
         super().__init__()
+        torch.autograd.set_detect_anomaly(True)
 
         if spatial_dims not in (2, 3):
             raise ValueError("`spatial_dims` can only be 2 or 3.")
@@ -120,7 +157,7 @@ class CustomVAE(nn.Module):
         self.out_channels = in_channels
         self.blocks_down = blocks_down
         self.latent_filters = vae_latent_channels
-        self.smallest_filters = 16
+        self.smallest_filters = smallest_filters
         self.blocks_up = blocks_up
         self.dropout_prob = dropout_prob
         self.act = act  # input options
@@ -164,12 +201,33 @@ class CustomVAE(nn.Module):
         if dropout_prob is not None:
             self.dropout = Dropout[Dropout.DROPOUT, spatial_dims](dropout_prob)
 
-        
+        # Create custom loss functions
+        if custom_losses is None:
+            custom_losses = ["l1"]
+        if custom_loss_weights is None:
+            custom_loss_weights = [1.0]
+        self.custom_losses = custom_losses
+        self.loss_functions = []
+        for loss_func in self.custom_losses:
+            if isinstance(loss_func, str):
+                if loss_func.lower() in loss_strings_to_classes:
+                    self.loss_functions.append(loss_strings_to_classes[loss_func.lower()])
+                else:
+                    raise ValueError(f"Unknown loss function string: {loss_func}")
+        self.custom_loss_weights = custom_loss_weights
         self.use_log_var = vae_use_log_var
         self.beta = beta
         
         self._prepare_vae_modules()
         self.vae_conv_final = self._make_final_conv(in_channels)
+        self.final_activation = final_activation
+        if self.final_activation is None or str(self.final_activation).lower() == "none":
+            self.final_act_mod = nn.Identity()
+        elif self.final_activation.lower() in ACTIVATION_REGISTRY:
+            self.final_act_mod = ACTIVATION_REGISTRY[self.final_activation.lower()]()
+        else:
+            raise ValueError(f"Unsupported final activation: {self.final_activation}")
+
 
         self.hparams = dict(
             vae_latent_channels=vae_latent_channels,
@@ -177,12 +235,18 @@ class CustomVAE(nn.Module):
             beta=beta,
             spatial_dims=spatial_dims,
             init_filters=init_filters,
+            smallest_filters=self.smallest_filters,
             in_channels=in_channels,
             dropout_prob=dropout_prob,
             act=act,
             norm=self.norm,  # already post-processed
+            norm_name=norm_name,
+            num_groups=num_groups,
+            custom_losses=self.custom_losses,
+            custom_loss_weights=self.custom_loss_weights,
             blocks_down=blocks_down,
             blocks_up=blocks_up,
+            final_activation=final_activation,
             upsample_mode=str(self.upsample_mode.value),  # constructor accepts string too
             use_attn=use_attn,
             attn_params=dataclasses.asdict(self.attn_params),
@@ -228,20 +292,30 @@ class CustomVAE(nn.Module):
                     ]
                 )
             )
-            up_samples.append(
-                nn.Sequential(
-                    *[
-                        get_conv_layer(spatial_dims, sample_in_channels, sample_in_channels // 2, kernel_size=1),
-                        get_upsample_layer(spatial_dims, sample_in_channels // 2, upsample_mode=upsample_mode),
-                    ]
+            if self.upsample_mode != UpsampleMode.PIXELSHUFFLE_V2:
+                up_samples.append(
+                    nn.Sequential(
+                        *[
+                            get_conv_layer(spatial_dims, sample_in_channels, sample_in_channels // 2, kernel_size=1),
+                            get_upsample_layer(spatial_dims, sample_in_channels // 2, upsample_mode=upsample_mode),
+                        ]
+                    )
                 )
-            )
+            else:
+                up_samples.append(
+                    DecoderUpsampleBlock3D_MONAI(
+                        in_channels=sample_in_channels,
+                        out_channels=sample_in_channels // 2,
+                        scale_factor=2,
+                        # act=self.act_mod,   # use your activation
+                    )
+                )
         return up_layers, up_samples
     
     def _make_final_conv(self, out_channels: int):
         return nn.Sequential(
-            get_norm_layer(name=self.norm, spatial_dims=self.spatial_dims, channels=self.init_filters),
-            self.act_mod,
+            # get_norm_layer(name=self.norm, spatial_dims=self.spatial_dims, channels=self.init_filters),
+            # self.act_mod,
             get_conv_layer(self.spatial_dims, self.init_filters, out_channels, kernel_size=1, bias=True),
         )
     
@@ -257,12 +331,21 @@ class CustomVAE(nn.Module):
             self.act_mod,
         )
 
-        self.vae_fc_up_sample = nn.Sequential(
-            get_conv_layer(self.spatial_dims, self.smallest_filters, v_filters, kernel_size=1),
-            get_upsample_layer(self.spatial_dims, v_filters, upsample_mode=self.upsample_mode),
-            get_norm_layer(name=self.norm, spatial_dims=self.spatial_dims, channels=v_filters),
-            self.act_mod,
-        )
+        if self.upsample_mode != UpsampleMode.PIXELSHUFFLE_V2:
+            self.vae_fc_up_sample = nn.Sequential(
+                get_conv_layer(self.spatial_dims, self.smallest_filters, v_filters, kernel_size=1),
+                get_upsample_layer(self.spatial_dims, v_filters, upsample_mode=self.upsample_mode),
+                get_norm_layer(name=self.norm, spatial_dims=self.spatial_dims, channels=v_filters),
+                self.act_mod,
+            )
+        else:
+            self.vae_fc_up_sample = DecoderUpsampleBlock3D_MONAI(
+                in_channels=self.smallest_filters,
+                out_channels=v_filters,
+                scale_factor=2,
+                act=nn.GELU,  # or whatever you're using for self.act_mod
+            )
+
 
         ## Added a conv layer for mean and conv layer for std
         self.vae_mean_layer = get_conv_layer(self.spatial_dims, self.smallest_filters, self.latent_filters, kernel_size=1)
@@ -272,6 +355,16 @@ class CustomVAE(nn.Module):
                             get_conv_layer(self.spatial_dims, self.latent_filters, self.smallest_filters, kernel_size=1),
                             self.act_mod,
                         )
+        
+    def get_loss(self, outputs, targets):
+        total_custom_loss = 0.0
+        for loss_func, loss_name, weights in zip(self.loss_functions, self.custom_losses, self.custom_loss_weights):
+            loss_value = loss_func(outputs, targets)
+            if loss_name in ['mse', 'l1']:
+                loss_value = loss_value.view(loss_value.size(0), -1).mean(dim=1)         # per-sample mean
+                loss_value = loss_value.mean() 
+            total_custom_loss += weights * loss_value
+        return total_custom_loss
 
     def forward(self, x):
         """
@@ -281,7 +374,11 @@ class CustomVAE(nn.Module):
         net_input = x
         z_mean, z_sigma, eps, logvar = self.encode(x)
         z_sample = self.sample(z_mean, z_sigma, eps)
-        decoded = self.decode(z_sample)
+        # In debug mode remove sampling for easier debugging
+        if self.debug_mode:
+            decoded = self.decode(z_mean)
+        else:
+            decoded = self.decode(z_sample)
         if self.debug_mode:
             print("Z_mean shape:", z_mean.shape)
             print("Z_sigma shape:", z_sigma.shape)
@@ -302,13 +399,10 @@ class CustomVAE(nn.Module):
                 kl_per_sample = kl_per_elem.view(kl_per_elem.size(0), -1).sum(dim=1)
                 kl = kl_per_sample.mean()
              
+            recon_loss = self.get_loss(decoded, net_input)
 
-            recon = F.mse_loss(net_input, decoded, reduction="none")
-            recon = recon.view(recon.size(0), -1).mean(dim=1)         # per-sample mean
-            recon_loss = recon.mean() 
-            
-            vae_loss =  recon_loss + self.beta * kl
-            
+            vae_loss = recon_loss + self.beta * kl
+
             return decoded, vae_loss
         return decoded
     
@@ -336,8 +430,11 @@ class CustomVAE(nn.Module):
             print("Shape After vae down:", x_vae.shape)
         if self.use_attn:
             x_vae = self.attn_layer(x_vae)
-
+        if self.debug_mode:
+            print("Shape After attn layer:", x_vae.shape)
         z_mean = self.vae_mean_layer(x_vae)
+        if self.debug_mode:
+            print("Z_mean shape after vae_mean_layer:", z_mean.shape)
         z_sigma = self.vae_std_layer(x_vae)
 
         z_mean_rand = torch.randn_like(z_mean)
@@ -361,7 +458,9 @@ class CustomVAE(nn.Module):
             x_vae = upl(x_vae)
 
         x_vae = self.vae_conv_final(x_vae)
-        
+
+        x_vae = self.final_act_mod(x_vae)
+
         return x_vae
 
     def sample(self, z_mean, z_std, eps=None):

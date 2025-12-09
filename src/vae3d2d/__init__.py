@@ -15,6 +15,7 @@ from .image_utils import (safe_delete,
 from .eval_3d import eval_model_3D
 from .train_3d import training_3D
 from .logger_utils import setup_logger
+from .loss_functions import Eagle_Loss_3D, gradient_loss
 from . import model_utils
 
 
@@ -37,6 +38,8 @@ __all__ = ["CustomVAE",
            "save_mp4",
            "eval_model_3D",
            "training_3D",
-           "setup_logger"]
+           "setup_logger",
+           "Eagle_Loss_3D",
+           "gradient_loss",]
 
 __version__ = "0.1.0"

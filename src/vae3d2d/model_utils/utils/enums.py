@@ -57,6 +57,7 @@ class UpsampleMode(StrEnum):
     DECONVGROUP = "deconvgroup"
     NONTRAINABLE = "nontrainable"  # e.g. using torch.nn.Upsample
     PIXELSHUFFLE = "pixelshuffle"
+    PIXELSHUFFLE_V2 = "pixelshuffle_v2"
 
 
 class InterpolateMode(StrEnum):
