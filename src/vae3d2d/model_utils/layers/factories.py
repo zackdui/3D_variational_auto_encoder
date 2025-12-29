@@ -66,6 +66,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch.nn as nn
+import torch
 
 from ..utils2 import has_nvfuser_instance_norm
 from ..utils import ComponentStore, look_up_option, optional_import
@@ -282,6 +283,45 @@ def instance_nvfuser_factory(dim):
         return nn.InstanceNorm3d
     return optional_import("apex.normalization", name="InstanceNorm3dNVFuser")[0]
 
+class ChannelFirstRMSNorm(nn.Module):
+    """
+    RMSNorm over channel dimension for channel-first tensors: (B, C, *spatial).
+    Normalizes each spatial location across channels.
+    """
+    def __init__(self, num_channels: int, eps: float = 1e-6, affine: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_channels))
+        else:
+            self.register_parameter("weight", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim < 2:
+            raise ValueError(f"Expected at least 2D tensor (B, C, ...), got shape {tuple(x.shape)}")
+
+        # Compute RMS over channels. Do reduction in fp32 for stability under AMP.
+        x_float = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        rms = torch.mean(x_float * x_float, dim=1, keepdim=True)
+        inv_rms = torch.rsqrt(rms + self.eps)
+
+        y = x * inv_rms.to(dtype=x.dtype)
+
+        if self.weight is not None:
+            # reshape to (1, C, 1, 1, 1, ...)
+            w = self.weight.view(1, -1, *([1] * (x.ndim - 2)))
+            y = y * w.to(dtype=y.dtype)
+
+        return y
+
+@Norm.factory_function("rms")
+def rms_factory(dim: int):
+    """
+    RMS normalization for channel-first CNN tensors.
+    dim is unused (kept for factory signature consistency).
+    """
+    return ChannelFirstRMSNorm
 
 Norm.add_factory_class("group", nn.GroupNorm)
 Norm.add_factory_class("layer", nn.LayerNorm)
@@ -300,6 +340,7 @@ Act.add_factory_class("sigmoid", nn.modules.Sigmoid)
 Act.add_factory_class("tanh", nn.modules.Tanh)
 Act.add_factory_class("softmax", nn.modules.Softmax)
 Act.add_factory_class("logsoftmax", nn.modules.LogSoftmax)
+Act.add_factory_class("silu", nn.modules.SiLU)
 
 
 @Act.factory_function("swish")
