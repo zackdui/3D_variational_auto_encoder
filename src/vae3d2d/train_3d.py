@@ -15,6 +15,7 @@ from .dataloaders import RandomPatch3DDataset, AllPatch3DDataset, RandomVolumeDa
 
 def training_3D(model: CustomVAE,
                 base_dataset, 
+                val_dataset=None,
                 optimizer_cls=torch.optim.AdamW,
                 optimizer_kwargs=None,
                 accum_steps=1,
@@ -56,6 +57,9 @@ def training_3D(model: CustomVAE,
     base_dataset : torch.utils.data.Dataset
         A dataset returning full 3D volumes of shape (C, D, H, W) or a dict
         containing such a tensor.
+
+    val_dataset : torch.utils.data.Dataset or None, default=None
+        A dataset for validation. If None, it will split base dataset for evaluation.
 
     optimizer_cls : torch.optim.Optimizer, default=torch.optim.AdamW
         Optimizer class used for training.
@@ -160,6 +164,7 @@ def training_3D(model: CustomVAE,
         "model_hparams": model.get_hparams(),
         "num_parameters": num_params,
         "base_dataset_class": base_dataset.__class__.__name__,
+        "val_dataset_class": val_dataset.__class__.__name__ if val_dataset else None,
         "optimizer_cls": f"{optimizer_cls.__module__}.{optimizer_cls.__name__}",
         "optimizer_kwargs": optimizer_kwargs or {},
         "accum_steps": accum_steps,
@@ -211,7 +216,11 @@ def training_3D(model: CustomVAE,
         logger.info("Initialized Weights & Biases run: %s", wandb.run.name)
     
     # Datasets
-    train_ds, val_ds = random_split(base_dataset, [train_split, 1 - train_split])
+    if val_dataset is None:
+        train_ds, val_ds = random_split(base_dataset, [train_split, 1 - train_split])
+    else:
+        train_ds = base_dataset
+        val_ds = val_dataset
     if patching is None:
         train_dataset = train_ds
         val_dataset = val_ds
