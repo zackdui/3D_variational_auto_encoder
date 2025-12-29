@@ -11,8 +11,22 @@ import numpy as np
 from pathlib import Path
 import os
 
-from .image_utils import safe_delete, prepare_for_wandb, volume_to_gif_frames, save_gif, save_mp4
+from .image_utils import (safe_delete, 
+                          prepare_for_wandb, 
+                          volume_to_gif_frames, 
+                          save_gif, 
+                          save_mp4)
 
+def isfinite_all(t: torch.Tensor) -> bool:
+    return torch.isfinite(t).all().item()
+
+def check_finite(name: str, t: torch.Tensor):
+    if not isfinite_all(t):
+        print(f"\n[NON-FINITE] {name}: shape={tuple(t.shape)} "
+              f"min={t.nan_to_num().min().item():.3e} "
+              f"max={t.nan_to_num().max().item():.3e}")
+        raise RuntimeError(f"Non-finite detected: {name}")
+    
 class Trainer:
     def __init__(
         self,
@@ -195,6 +209,7 @@ class Trainer:
         num_batches = 0
         window_loss_sum = 0.0
         window_loss_count = 0
+        window_recon_sum = 0.0
 
         # tqdm over the dataloader, only on main process
         desc = "Train"
@@ -215,8 +230,12 @@ class Trainer:
             if self.use_amp:
                 with autocast(device_type="cuda", dtype=self.amp_dtype):
                     out, loss = self.model(x)  # model is in train mode → (out, loss)
+                    check_finite("loss (forward)", loss.detach())
+                    check_finite("out (forward)", out.detach())
             else:
                 out, loss = self.model(x)
+                check_finite("loss (forward)", loss.detach())
+                check_finite("out (forward)", out.detach())
 
             # Don't divide loss by accum_steps yet, need raw loss for logging
             raw_loss = loss.detach()
@@ -229,6 +248,14 @@ class Trainer:
             else:
                 loss.backward()
 
+            for n, p in self.model.named_parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    print("\n[NON-FINITE GRAD]", n,
+                        "grad min/max:",
+                        p.grad.nan_to_num().min().item(),
+                        p.grad.nan_to_num().max().item())
+                    raise RuntimeError(f"Non-finite grad at {n}")
+
             total_grad_norm = 0.0
             for p in self.model.parameters():
                 if p.grad is not None:
@@ -238,27 +265,32 @@ class Trainer:
             if self.is_main_process:  # rank == 0
                 wandb.log({"train/grad_norm": total_grad_norm})
 
-            # out, loss = self.model(x)  # model is in train mode → (out, loss)
-            # loss = loss / self.accum_steps
-            # loss.backward()
-
             running_loss += raw_loss.item()
             num_batches += 1
             window_loss_sum += raw_loss.item()
             window_loss_count += 1
+            window_recon_sum += F.l1_loss(out, x, reduction='mean').item()
             
-
             # optimizer step when we've accumulated enough grads
             if ((step + 1) % self.accum_steps == 0) or (step + 1 == len(dataloader)):
                 if self.use_grad_scaler and self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
-                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=100.0)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    true_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=100.0)
                     self.optimizer.step()
                 self.optimizer.zero_grad()
+
+                # Chack and make sure everything is finite
+                for n, p in self.model.named_parameters():
+                    if not torch.isfinite(p).all():
+                        print("\n[NON-FINITE PARAM]", n,
+                            "param min/max:",
+                            p.data.nan_to_num().min().item(),
+                            p.data.nan_to_num().max().item())
+                        raise RuntimeError(f"Non-finite param at {n}")
 
                 if self.is_main_process:
                     wandb.log({"grad_norm_true": true_grad_norm})
@@ -285,17 +317,22 @@ class Trainer:
                     if self.is_distributed:
                         # pack [sum, count] into a tensor on the correct device
                         stats = torch.tensor(
-                            [window_loss_sum, float(window_loss_count)],
+                            [window_loss_sum, float(window_loss_count), window_recon_sum],
                             device=self.device,
                             dtype=torch.float32,
                         )
                         # all_reduce with SUM so we get global totals
                         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-                        total_loss_sum, total_count = stats.tolist()
+                        total_loss_sum, total_count, total_recon_sum = stats.tolist()
                         window_avg = total_loss_sum / max(total_count, 1.0)
+
+                        window_recon_avg = total_recon_sum / max(total_count, 1.0)
+
                     else:
                         # single-process case
                         window_avg = window_loss_sum / window_loss_count
+
+                        window_recon_avg = window_recon_sum / window_loss_count
 
                     # only main process updates best + saves
                     if self.is_main_process:
@@ -308,10 +345,16 @@ class Trainer:
 
                         # ---- log to Weights & Biases ----
                         if self.use_wandb:
+                            # recon_l1 = (out - x).abs().mean().item()
+                            max_err = (out - x).abs().max().item()
+                            out_range = (out.min(), out.max())
                             wandb.log(
                                 {
                                     "train/window_avg_loss": window_avg,
                                     "train/global_step": self.global_step,
+                                    "train/recon_l1": window_recon_avg,
+                                    "train/max_err_single_batch": max_err,
+                                    "train/out_range": out_range,
                                 },
                             )
 
@@ -322,14 +365,11 @@ class Trainer:
                     # reset window stats after each check
                     window_loss_sum = 0.0
                     window_loss_count = 0
+                    window_recon_sum = 0.0
 
             # update tqdm postfix with current (unscaled) loss
             if self.is_main_process:
                 iterator.set_postfix(loss=float(raw_loss.item()))
-
-            # if ((step + 1) % self.accum_steps == 0) or (step + 1 == len(dataloader)):
-            #     self.optimizer.step()
-            #     self.optimizer.zero_grad()
 
         avg_loss = running_loss / num_batches if num_batches > 0 else 0.0
 
@@ -363,6 +403,7 @@ class Trainer:
 
         b_num = 0
         losses = []
+        recons = []
         for batch in iterator:
             b_num += 1
             x = batch.to(self.device, non_blocking=True)
@@ -372,13 +413,15 @@ class Trainer:
                 with autocast(device_type="cuda", dtype=self.amp_dtype):
                     out = self.model(x)  # eval mode → only out
                     loss = F.mse_loss(out, x)
+                    recon_l1 = F.l1_loss(out, x, reduction='mean').item()
             else:
                 out = self.model(x)
                 loss = F.mse_loss(out, x)
+                recon_l1 = F.l1_loss(out, x, reduction='mean').item()
 
-            # out = self.model(x)  # eval mode → only out
-            # loss = F.mse_loss(out, x)
+
             losses.append(loss.item())
+            recons.append(recon_l1)
             if self.is_main_process:
                 iterator.set_postfix(val_loss=float(loss.item()))
 
@@ -387,9 +430,6 @@ class Trainer:
                 # x, out: (N, C, D, H, W)
                 vol_in = x[0, 0]   # (D, H, W)
                 vol_out = out[0, 0]
-
-                # print("input:", vol_in.min().item(), vol_in.max().item())
-                # print("recon:", vol_out.min().item(), vol_out.max().item())
 
                 # ---- 2D middle slice images (what you already had) ----
                 mid = vol_in.shape[0] // 2
@@ -441,15 +481,16 @@ class Trainer:
 
         
         loss_average = sum(losses) / max(len(losses), 1)
+        recon_l1_average = sum(recons) / max(len(recons), 1)
 
         if dist.is_available() and dist.is_initialized():
             loss_tensor = torch.tensor(loss_average, device=self.device, dtype=torch.float32)
             loss_average = self.ddp_average(loss_tensor)
      
-        return loss_average
+        return loss_average, recon_l1_average
     
     def train(self, train_loader, val_loader=None, num_epochs: int = 10,
-              train_sampler=None):
+              train_sampler=None, val_sampler=None):
         """
         High-level training loop.
         train_sampler: DistributedSampler in DDP (so we can call set_epoch).
@@ -459,6 +500,8 @@ class Trainer:
         for epoch in range(num_epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch)
 
             # train_loss = self.train_epoch(train_loader)
             train_loss = self.train_epoch(train_loader, epoch=epoch, num_epochs=num_epochs)
@@ -473,8 +516,8 @@ class Trainer:
 
             eval_loss = None
             if val_loader is not None:
-                eval_loss = self.eval_epoch(val_loader, epoch=epoch, num_epochs=num_epochs)
-                # eval_loss = self.eval_epoch(val_loader)
+                eval_loss, recon_loss = self.eval_epoch(val_loader, epoch=epoch, num_epochs=num_epochs)
+
                 history["val_loss"].append(eval_loss)
 
                 if self.is_main_process:
@@ -497,6 +540,7 @@ class Trainer:
                 }
                 if eval_loss is not None:
                     log_dict["val/loss"] = eval_loss
+                    log_dict["val/recon_l1"] = recon_loss
 
                 lr = self.optimizer.param_groups[0]["lr"]
                 log_dict["lr"] = lr

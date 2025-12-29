@@ -190,13 +190,37 @@ class Eagle_Loss_3D(nn.Module):
         # so this is effectively mean over all slices.
         return loss
 
-def gradient_loss(pred, target):
-    dx = torch.abs(pred[:, :, 1:, :, :] - pred[:, :, :-1, :, :])
-    dy = torch.abs(pred[:, :, :, 1:, :] - pred[:, :, :, :-1, :])
-    dz = torch.abs(pred[:, :, :, :, 1:] - pred[:, :, :, :, :-1])
+def gradient_loss_3d(pred, target):
+    """
+    3D gradient loss for edge preservation
+    pred, target: [B, C, D, H, W]
+    """
+    # Gradients in all 3 dimensions
+    grad_d_pred = pred[:, :, 1:, :, :] - pred[:, :, :-1, :, :]
+    grad_h_pred = pred[:, :, :, 1:, :] - pred[:, :, :, :-1, :]
+    grad_w_pred = pred[:, :, :, :, 1:] - pred[:, :, :, :, :-1]
     
-    dx_t = torch.abs(target[:, :, 1:, :, :] - target[:, :, :-1, :, :])
-    dy_t = torch.abs(target[:, :, :, 1:, :] - target[:, :, :, :-1, :])
-    dz_t = torch.abs(target[:, :, :, :, 1:] - target[:, :, :, :, :-1])
+    grad_d_target = target[:, :, 1:, :, :] - target[:, :, :-1, :, :]
+    grad_h_target = target[:, :, :, 1:, :] - target[:, :, :, :-1, :]
+    grad_w_target = target[:, :, :, :, 1:] - target[:, :, :, :, :-1]
     
-    return (dx - dx_t).abs().mean() + (dy - dy_t).abs().mean() + (dz - dz_t).abs().mean()
+    loss_d = F.l1_loss(grad_d_pred, grad_d_target)
+    loss_h = F.l1_loss(grad_h_pred, grad_h_target)
+    loss_w = F.l1_loss(grad_w_pred, grad_w_target)
+    
+    return loss_d + loss_h + loss_w
+
+def focal_frequency_loss_3d(pred, target):
+    """
+    3D FFT-based loss for high-frequency details
+    pred, target: [B, C, D, H, W]
+    """
+    # 3D FFT
+    pred_fft = torch.fft.rfftn(pred, dim=(-3, -2, -1))
+    target_fft = torch.fft.rfftn(target, dim=(-3, -2, -1))
+    
+    # Use magnitude
+    pred_mag = torch.abs(pred_fft)
+    target_mag = torch.abs(target_fft)
+    
+    return F.l1_loss(pred_mag, target_mag)

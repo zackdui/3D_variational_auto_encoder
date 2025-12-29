@@ -9,6 +9,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# -------------------------------------------------------------------------
+# Modifications made by Zack Duitz, 2025.
+# Significant changes include: Adding the net_weight parameter
+# This file is therefore a modified version of the original MONAI file.
+# -------------------------------------------------------------------------
+
+
 from __future__ import annotations
 
 import torch.nn as nn
@@ -55,6 +62,7 @@ class ResBlock(nn.Module):
         norm: tuple | str,
         kernel_size: int = 3,
         act: tuple | str = ("RELU", {"inplace": True}),
+        net_weight: float = 1.0
     ) -> None:
         """
         Args:
@@ -63,6 +71,7 @@ class ResBlock(nn.Module):
             norm: feature normalization type and arguments.
             kernel_size: convolution kernel size, the value should be an odd number. Defaults to 3.
             act: activation type and arguments. Defaults to ``RELU``.
+            net_weight: weight for the residual connection. Defaults to 1.0.
         """
 
         super().__init__()
@@ -79,6 +88,7 @@ class ResBlock(nn.Module):
         self.conv2 = get_conv_layer(
             spatial_dims, in_channels=in_channels, out_channels=in_channels, kernel_size=kernel_size
         )
+        self.net_weight = net_weight
 
     def forward(self, x):
         identity = x
@@ -91,6 +101,6 @@ class ResBlock(nn.Module):
         x = self.act(x)
         x = self.conv2(x)
 
-        x += identity
+        x = identity + self.net_weight * x
 
         return x

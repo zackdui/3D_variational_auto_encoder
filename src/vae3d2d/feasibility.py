@@ -102,7 +102,7 @@ def find_max_batch_size_power2(
 
     return best
 
-def test_memory(model, use_amp=False):
+def test_memory(model, input_shape=(1, 1, 32, 128, 128), use_amp=False):
     """
     Run a controlled forward/backward pass on a 3D model and report GPU memory
     usage, including peak allocations, to help diagnose memory bottlenecks.
@@ -119,6 +119,9 @@ def test_memory(model, use_amp=False):
         `(output, loss)` where `loss` is a scalar tensor suitable for
         `.backward()`.
 
+    input_shape : tuple, default=(1, 1, 32, 128, 128)
+        The shape of the input tensor to the model.
+
     use_amp : bool, default=False
         If True, the forward pass is executed under `torch.amp.autocast` with
         `dtype=torch.float16`, allowing measurement of memory savings provided by
@@ -127,8 +130,9 @@ def test_memory(model, use_amp=False):
 
     Notes
     -----
-    - The dummy input tensor has shape `(1, 1, 208, 512, 512)` and is allocated
+    - The dummy input tensor has shape input_shape and is allocated
     on CUDA. Modify the shape if your model expects different dimensions.
+        -Ex. `(1, 1, 208, 512, 512)`
     - The model is set to training mode (`model.train()`) so that backward pass
     memory usage is representative of training.
     - The function resets CUDA peak memory statistics before running.
@@ -155,7 +159,7 @@ def test_memory(model, use_amp=False):
     model.train()
 
     # Dummy input
-    x = torch.randn(1, 1, 208, 512, 512, device=device)
+    x = torch.randn(input_shape, device=device)
 
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()

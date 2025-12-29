@@ -32,6 +32,7 @@ def training_3D(model: CustomVAE,
                 use_grad_scaler=False,
                 logger: logging.Logger | None =None,
                 use_wandb=False,
+                wandb_project="3d_vae",
                 wandb_run_name="run01",
                 checkpoint_dir="./checkpoints",
                 final_save_dir=None,
@@ -111,6 +112,9 @@ def training_3D(model: CustomVAE,
     use_wandb : bool, default=False
         Enable Weights & Biases logging (only on rank 0 during DDP).
 
+    wandb_project : str, default="3d_vae"
+        Name of the W&B project.
+
     wandb_run_name : str, default="run01"
         Name of the W&B run if logging is enabled.
 
@@ -148,11 +152,13 @@ def training_3D(model: CustomVAE,
     - AMP + gradient scaling (if enabled) can significantly reduce memory usage.
     """
     logger = logger or logging.getLogger(__name__)
-    print("Here Starting VAE Training in Local version")
+    
+    num_params =sum(p.numel() for p in model.parameters())
 
     hparams = {
         "model_class": f"{model.__class__.__module__}.{model.__class__.__name__}",
         "model_hparams": model.get_hparams(),
+        "num_parameters": num_params,
         "base_dataset_class": base_dataset.__class__.__name__,
         "optimizer_cls": f"{optimizer_cls.__module__}.{optimizer_cls.__name__}",
         "optimizer_kwargs": optimizer_kwargs or {},
@@ -198,7 +204,7 @@ def training_3D(model: CustomVAE,
 
     if rank == 0 and use_wandb:  # only main process
         wandb.init(
-            project="3d-vae",     # choose a project name (creates if missing)
+            project=wandb_project,     # choose a project name (creates if missing)
             name=f"{wandb_run_name}_{time.time()}",        # optional run name
             config=hparams,       # logs hyperparameters automatically
         )
@@ -232,7 +238,7 @@ def training_3D(model: CustomVAE,
             val_dataset,
             num_replicas=world_size,
             rank=rank,
-            shuffle=False,
+            shuffle=(patching != "full"),
             drop_last=False,
         )
     else:
@@ -245,6 +251,7 @@ def training_3D(model: CustomVAE,
         sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=True,
+        shuffle=False,
     )
 
     val_loader = DataLoader(
@@ -253,6 +260,7 @@ def training_3D(model: CustomVAE,
         sampler=val_sampler,
         num_workers=0,
         pin_memory=True,
+        shuffle=False,
     )
 
     # Define your model
@@ -282,7 +290,8 @@ def training_3D(model: CustomVAE,
         train_loader=train_loader,
         val_loader=val_loader,
         num_epochs=epochs,
-        train_sampler=train_sampler
+        train_sampler=train_sampler,
+        val_sampler=val_sampler,
     )
 
     if rank == 0:
