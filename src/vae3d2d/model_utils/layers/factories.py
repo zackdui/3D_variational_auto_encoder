@@ -8,6 +8,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# -------------------------------------------------------------------------
+# Modifications made by Zack Duitz, 2025.
+# Significant changes include: Adding silu and rms compatibility
+# This file is therefore a modified version of the original MONAI file.
+# -------------------------------------------------------------------------
+
 """
 Defines factories for creating layers in generic, extensible, and dimensionally independent ways. A separate factory
 object is created for each type of layer, and factory functions keyed to names are added to these objects. Whenever
