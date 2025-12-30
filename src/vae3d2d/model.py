@@ -110,6 +110,7 @@ class CustomVAE(nn.Module):
     Ouput of the encoder is (B, latent_filters, D/16, H/16, W/16) with defaults.
 
     Args:
+        model_name: name of the model to be returned by get_name()
         vae_latent_channels: Number of channels to have in the latent representation
         use_log_var: If this is true, it will use logvar for std instead of std directly
         beta: In vae loss what beta to apply
@@ -153,6 +154,7 @@ class CustomVAE(nn.Module):
 
     def __init__(
         self,
+        model_name: str = "default_vae",
         vae_latent_channels: int = 4,
         vae_use_log_var: bool = False,
         beta: float = 1.0,
@@ -184,6 +186,7 @@ class CustomVAE(nn.Module):
         if spatial_dims not in (2, 3):
             raise ValueError("`spatial_dims` can only be 2 or 3.")
 
+        self.model_name = model_name
         self.debug_mode = debug_mode
         self.use_checkpoint = use_checkpoint
         self.spatial_dims = spatial_dims
@@ -194,7 +197,10 @@ class CustomVAE(nn.Module):
 
         self.downsample_strides = downsample_strides
         self.vae_down_stride = vae_down_stride
-
+        # asserts to make sure inputs are valid
+        assert len(blocks_up) == len(blocks_down) - 1, "blocks_up must have one less element than blocks_down"
+        assert len(self.downsample_strides) == len(self.blocks_down) - 1, "downsample_strides must have one less element than blocks_down"
+        
         if self.downsample_strides is None:
             self.downsample_strides = [(2, 2, 2)] * (len(self.blocks_down) - 1)
         if self.vae_down_stride is None:
@@ -272,6 +278,7 @@ class CustomVAE(nn.Module):
 
 
         self.hparams = dict(
+            model_name=model_name,
             vae_latent_channels=vae_latent_channels,
             vae_use_log_var=vae_use_log_var,
             beta=beta,
@@ -300,7 +307,10 @@ class CustomVAE(nn.Module):
 
     def get_hparams(self):
         return self.hparams
-    
+
+    def get_name(self):
+        return self.model_name
+
     def _make_down_layers(self):
         down_layers = nn.ModuleList()
         blocks_down, spatial_dims, filters, norm = (self.blocks_down, self.spatial_dims, self.init_filters, self.norm)
