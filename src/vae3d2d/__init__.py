@@ -11,7 +11,8 @@ from .image_utils import (safe_delete,
                           save_side_by_side_slices, 
                           sliding_window_reconstruct, 
                           reconstruct_volume,
-                          volume_to_gif_frames)
+                          volume_to_gif_frames,
+                          log_slice_montage)
 from .eval_3d import eval_model_3D
 from .train_3d import training_3D
 from .logger_utils import setup_logger
@@ -42,6 +43,7 @@ __all__ = ["CustomVAE",
            "Eagle_Loss_3D",
            "gradient_loss_3d",
            "test_memory",
-           "focal_frequency_loss_3d"]
+           "focal_frequency_loss_3d",
+           "log_slice_montage"]
 
 __version__ = "0.1.0"

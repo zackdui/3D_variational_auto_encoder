@@ -1,6 +1,7 @@
 # This file contains utils for saving images to disk and wandb
 from typing import Tuple, Literal, Optional
 from PIL import Image
+import matplotlib.pyplot as plt
 import logging
 import torch
 import tempfile
@@ -187,8 +188,8 @@ def save_side_by_side_slices(
     x_vol: torch.Tensor,          # (C, D, H, W) in [-1, 1]
     recon_vol: torch.Tensor,      # (C, D, H, W), may exceed [-1, 1]
     save_dir: str,
-    num_slices: int = 10,       # how many slices to save
-    start_idx: int = 80,           # first slice index to save
+    num_slices: int = 5,       # how many slices to save
+    start_idx: int = 10,           # first slice index to save
     merge_to_grayscale: bool = False,
     logger: logging.Logger | None =None,
 ) -> None:
@@ -410,3 +411,27 @@ def reconstruct_volume(
 
     else:
         raise ValueError(f"Unknown mode: {mode}")
+
+@torch.no_grad()
+def log_slice_montage(slices: list, labels: list, cmap="gray"):
+    """
+    slices: list of 2D numpy arrays (H,W) already processed (e.g., prepare_for_wandb output)
+    labels: list of strings, same length
+
+    returns a matplot fig
+    Please use plt.close(fig) after logging.
+    """
+    assert len(slices) == len(labels)
+    n = len(slices)
+
+    fig, axes = plt.subplots(1, n, figsize=(3.0 * n, 3.0))
+    if n == 1:
+        axes = [axes]
+
+    for ax, img, lab in zip(axes, slices, labels):
+        ax.imshow(img, cmap=cmap)
+        ax.set_title(lab, fontsize=10)
+        ax.axis("off")
+
+    fig.tight_layout()
+    return fig

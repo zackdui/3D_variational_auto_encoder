@@ -24,3 +24,6 @@ env*/
 # IDE / editor junk
 .DS_Store
 .vscode/
+
+# Custom
+src/vae3d2d/latent_utils.py
