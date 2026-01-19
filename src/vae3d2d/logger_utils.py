@@ -1,6 +1,7 @@
 import os
 import logging
 from pathlib import Path
+import torch
 
 def setup_logger(save_dir: str = None, name: str = "vae_trainer", train=True) -> logging.Logger:
     if save_dir is None:

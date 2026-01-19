@@ -1,12 +1,13 @@
-# Torch myst be installed separetly on each machine so that requirements can 
+# Torch and monai must be installed separetly on each machine so that requirements can 
 # be compatible with different CUDA versions
-# torch
+torch
+monai
 numpy
 wandb
 tqdm
 imageio[ffmpeg]
 pillow
-monai
+matplotlib
 
 
 

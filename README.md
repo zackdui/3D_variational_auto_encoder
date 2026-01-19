@@ -30,7 +30,7 @@ Both methods support CPU or GPU machines.
 - GPU optional but recommended for 3D workloads  
 - Install either:
   - `requirements-gpu.txt` → includes CUDA-enabled PyTorch  
-  - `requirements.txt` → CPU environment (PyTorch must be installed first)  
+  - `requirements.txt` → CPU environment (PyTorch and MONAI must be installed first)  
   - `requirements.in` → fully pinned development environment  
 
 ---

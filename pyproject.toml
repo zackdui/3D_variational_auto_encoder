@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vae3d2d"                    # what you `pip install`
-version = "0.1.0"
+version = "0.2.0"
 description = "3D and 2D VAE tools for medical and grayscale images"
 readme = "pypi_description.md"
 requires-python = ">=3.9"
