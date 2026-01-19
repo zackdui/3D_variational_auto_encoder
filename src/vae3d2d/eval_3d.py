@@ -20,7 +20,10 @@ def eval_model_3D(model,
                use_blending=True, 
                logger: logging.Logger | None =None,
                use_wandb=False,
-               wandb_run_name="run01",):
+               wandb_run_name="run01",
+               wandb_project_name="3d_vae_evals",
+               num_examples_to_save=1,
+               is_hu=True):
     """
     Evaluate a 3D reconstruction model on a dataset using either full-volume
     inference or patch-based inference with optional blending.
@@ -81,6 +84,16 @@ def eval_model_3D(model,
     wandb_run_name : str, default="run01"
         Name of the W&B run to use when `use_wandb=True`.
 
+    wandb_project_name : str, default="3d_vae_evals"
+        Name of the W&B project to use when `use_wandb=True`.
+
+    num_examples_to_save : int, default=1
+        Number of example volumes to save.
+
+    is_hu : bool, default=True
+        If True, assumes input volumes are in HU (Hounsfield Units) and applies
+        appropriate windowing for visualization.
+
     Returns
     -------
     dict
@@ -133,7 +146,7 @@ def eval_model_3D(model,
 
     if rank == 0 and use_wandb:  # only main process
         wandb.init(
-            project="3d-vae",     # choose a project name (creates if missing)
+            project=wandb_project_name,     # choose a project name (creates if missing)
             name=f"eval_{wandb_run_name}_{time.time()}",        # run name
             config=hparams,       # logs hyperparameters automatically
         )
@@ -173,6 +186,8 @@ def eval_model_3D(model,
         save_example_dir=save_dir_here,
         example_volume_index=0,
         use_blending=use_blending,
+        num_examples_to_save=num_examples_to_save,
+        is_hu=is_hu,
         logger=logger,
         use_wandb=use_wandb
     )
@@ -184,3 +199,4 @@ def eval_model_3D(model,
 
     if is_distributed:
         dist.destroy_process_group()
+    return results

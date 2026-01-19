@@ -29,7 +29,8 @@ def evaluate_model_on_full_volumes(
     use_blending: bool = True,
     device: Optional[torch.device] = None,
     save_example_dir: Optional[str] = None,
-    example_volume_index: int = 0,
+    num_examples_to_save: int = 1,
+    is_hu: bool = True,
     logger: logging.Logger | None =None,
     use_wandb: bool = False,
 ) -> Dict[str, torch.Tensor]:
@@ -80,8 +81,12 @@ def evaluate_model_on_full_volumes(
         `(C, D, H, W, 2)` where each slice is:
         `[original | reconstructed]`.
 
-    example_volume_index : int, default=0
-        Index (in dataset order) of the volume to save as an example.
+    num_examples_to_save : int, default=1
+        Number of example volumes to save.
+
+    is_hu : bool, default=True
+        If True, assumes input volumes are in HU (Hounsfield Units) and applies
+        appropriate windowing for visualization.
 
     logger : logging.Logger or None, default=None
         Optional logger for progress updates and debugging messages.
@@ -128,9 +133,11 @@ def evaluate_model_on_full_volumes(
     is_main_process = (rank == 0)
 
     per_batch_mses = []  # list of (B,) tensors on CPU
+    local_l1_sum = 0.0
+    local_l1_count = 0.0
+    examples_saved = 0
 
     global_vol_idx = 0
-    example_saved = False
 
     desc = "Eval"
     
@@ -159,20 +166,21 @@ def evaluate_model_on_full_volumes(
         )
 
         mse_per_vol = F.mse_loss(recon, x, reduction="none")
+        l1_per_vol = F.l1_loss(recon, x, reduction="mean")
         mse_per_vol = mse_per_vol.view(B, -1).mean(dim=1)  # (B,)
         per_batch_mses.append(mse_per_vol.cpu())
+        local_l1_sum += l1_per_vol.detach()
+        local_l1_count += 1
 
         # Save example only once, and only on rank 0 if DDP.
         if (
             save_example_dir is not None
-            and not example_saved
+            and examples_saved < num_examples_to_save
             and rank == 0
         ):
-            start_idx = global_vol_idx
-            end_idx = global_vol_idx + B
+
+            for local_idx in range(B):
             # Verify example volume index is in range
-            if start_idx <= example_volume_index < end_idx:
-                local_idx = example_volume_index - start_idx
                 x_vol = x[local_idx].detach().cpu()         # (C, D, H, W)
                 recon_vol = recon[local_idx].detach().cpu() # (C, D, H, W)
 
@@ -196,12 +204,12 @@ def evaluate_model_on_full_volumes(
                     })
 
                     # ---- 3D scrollable GIF: input volume ----
-                    input_frames = volume_to_gif_frames(vol_in, every_n=2)  # every 2 slices, tweak as needed
+                    input_frames = volume_to_gif_frames(vol_in, every_n=2, is_hu=is_hu)  # every 2 slices, tweak as needed
                     input_gif_path = save_gif(input_frames, fps=10)
                     input_mp4_path = save_mp4(input_frames, fps=10)
 
                     # ---- 3D scrollable GIF: side-by-side (input | recon) ----
-                    recon_frames = volume_to_gif_frames(vol_out, every_n=2)
+                    recon_frames = volume_to_gif_frames(vol_out, every_n=2, is_hu=is_hu)
                     # ensure same length
                     n_frames = min(len(input_frames), len(recon_frames))
                     side_by_side_frames = [
@@ -226,7 +234,9 @@ def evaluate_model_on_full_volumes(
                     safe_delete(input_mp4_path)
                     safe_delete(side_mp4_path)
                     
-                example_saved = True
+                examples_saved += 1
+                if examples_saved >= num_examples_to_save:
+                    break
 
         global_vol_idx += B
 
@@ -238,18 +248,34 @@ def evaluate_model_on_full_volumes(
     local_count = torch.tensor(
         per_volume_mse_local.numel(), dtype=torch.float32, device=device
     )
-
+    
     if is_distributed:
         tensor = torch.stack([local_sum, local_count])  # (2,)
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         global_sum, global_count = tensor[0], tensor[1]
         mean_mse = (global_sum / global_count).cpu()
+
+        l1_tensor = torch.stack([local_l1_sum, local_l1_count])
+        dist.all_reduce(l1_tensor, op=dist.ReduceOp.SUM)
+
+        global_l1_sum, global_l1_count = l1_tensor.tolist()
+        global_l1_avg = global_l1_sum / max(global_l1_count, 1)
     else:
         mean_mse = (local_sum / local_count).cpu()
+        global_l1_avg = local_l1_sum / max(local_l1_count, 1)
+
+    if rank == 0 and use_wandb:
+        table = wandb.Table(columns=["metric", "value"])
+        table.add_data("mean_mse", float(mean_mse))
+        table.add_data("mean_l1",  float(global_l1_avg.item()))
+        wandb.log({"final_metrics": table}, commit=True)
+        wandb.run.summary["final/mean_mse"] = float(mean_mse)
+        wandb.run.summary["final/mean_l1"]  = float(global_l1_avg.item())
 
     return {
         "per_volume_mse": per_volume_mse_local,  # local-only if DDP
         "mean_mse": mean_mse,                    # global if DDP
+        "global_l1_avg": global_l1_avg
     }
 
 # Example Usage
