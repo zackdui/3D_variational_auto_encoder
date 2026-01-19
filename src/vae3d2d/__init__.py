@@ -15,7 +15,7 @@ from .image_utils import (safe_delete,
                           log_slice_montage)
 from .eval_3d import eval_model_3D
 from .train_3d import training_3D
-from .logger_utils import setup_logger
+from .logger_utils import setup_logger, LossMeter
 from .loss_functions import Eagle_Loss_3D, gradient_loss_3d, focal_frequency_loss_3d
 from . import model_utils
 
@@ -44,6 +44,7 @@ __all__ = ["CustomVAE",
            "gradient_loss_3d",
            "test_memory",
            "focal_frequency_loss_3d",
-           "log_slice_montage"]
+           "log_slice_montage",
+           "LossMeter"]
 
 __version__ = "0.1.0"

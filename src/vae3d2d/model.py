@@ -40,6 +40,7 @@ from .model_utils.utils import UpsampleMode
 from .model_utils.blocks import SelfAttentionND
 from .model_utils.blocks.upsample_new import DecoderUpsampleBlock3D_MONAI
 from .loss_functions import Eagle_Loss_3D, gradient_loss_3d, focal_frequency_loss_3d
+from .logger_utils import LossMeter
 
 # New refine block to try
 # refine = nn.Sequential(
@@ -109,11 +110,17 @@ class CustomVAE(nn.Module):
     With Default parameters VAE_down (right before mean and std layers) will have (B, smallest_filters, D/16, H/16, W/16)
     Ouput of the encoder is (B, latent_filters, D/16, H/16, W/16) with defaults.
 
+    When the model is in eval mode the forward module will use the z_mean for decoding
+    not the sampled version.
+
     Args:
         model_name: name of the model to be returned by get_name()
         vae_latent_channels: Number of channels to have in the latent representation
         use_log_var: If this is true, it will use logvar for std instead of std directly
         beta: In vae loss what beta to apply
+        fixed_std: If this is not None, it will use this fixed std for all elements instead of learning it
+            - If this is none the standard will be learned
+            - If this is set the kl will become L2 regularization
         spatial_dims: spatial dimension of the input data. Defaults to 3.
         init_filters: number of output channels for initial convolution layer. Defaults to 8.
         smallest_filters: number of channels at the bottleneck of the VAE before latent channels. Defaults to 64.
@@ -158,6 +165,7 @@ class CustomVAE(nn.Module):
         vae_latent_channels: int = 4,
         vae_use_log_var: bool = False,
         beta: float = 1.0,
+        fixed_std: float | None = None,
         spatial_dims: int = 3,
         init_filters: int = 8,
         smallest_filters: int = 64,
@@ -185,7 +193,8 @@ class CustomVAE(nn.Module):
 
         if spatial_dims not in (2, 3):
             raise ValueError("`spatial_dims` can only be 2 or 3.")
-
+        self.meter = LossMeter()
+        self.debug_step = 0
         self.model_name = model_name
         self.debug_mode = debug_mode
         self.use_checkpoint = use_checkpoint
@@ -265,6 +274,7 @@ class CustomVAE(nn.Module):
         self.custom_loss_weights = custom_loss_weights
         self.use_log_var = vae_use_log_var
         self.beta = beta
+        self.fixed_std = fixed_std
         
         self._prepare_vae_modules()
         self.vae_conv_final = self._make_final_conv(in_channels)
@@ -276,12 +286,12 @@ class CustomVAE(nn.Module):
         else:
             raise ValueError(f"Unsupported final activation: {self.final_activation}")
 
-
         self.hparams = dict(
             model_name=model_name,
             vae_latent_channels=vae_latent_channels,
             vae_use_log_var=vae_use_log_var,
             beta=beta,
+            fixed_std=self.fixed_std,
             spatial_dims=spatial_dims,
             init_filters=init_filters,
             smallest_filters=self.smallest_filters,
@@ -305,11 +315,21 @@ class CustomVAE(nn.Module):
             debug_mode=debug_mode
         )
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+    
     def get_hparams(self):
         return self.hparams
 
     def get_name(self):
         return self.model_name
+
+    def set_beta(self, beta):
+        self.beta = beta
+
+    def get_beta(self):
+        return self.beta
 
     def _make_down_layers(self):
         down_layers = nn.ModuleList()
@@ -439,32 +459,82 @@ class CustomVAE(nn.Module):
         # In debug mode remove sampling for easier debugging
         if self.debug_mode:
             decoded = self.decode(z_mean)
-        else:
+        elif self.training:
             decoded = self.decode(z_sample)
+        else: # If we are not training I want to use the mean
+            decoded = self.decode(z_mean)
         if self.debug_mode:
             print("Z_mean shape:", z_mean.shape)
             print("Z_sigma shape:", z_sigma.shape)
             print("Decoded shape:", decoded.shape)
             print("eps shape:", eps.shape)
-        # Only in train mode return the loss
-        if self.training:
+        kl = torch.zeros((), device=z_mean.device, dtype=z_mean.dtype)
+        # Only in train mode return the loss and don't waste computation time if beta is 0
+        if self.training and self.beta > 0 and self.fixed_std is None:
             if self.use_log_var:
                 # kl_per_elem = -0.5 * torch.sum(1 + logvar - z_mean.pow(2) - logvar.exp())
                 kl_elem = -0.5 * (1 + logvar - z_mean.pow(2) - logvar.exp())
+
+                # sum and then mean
+                # free_nats = 0.7 * kl_per_sample_mean
+                # kl_per_sample = kl_per_elem.view(B, -1).sum(dim=1)  # (B,)
+
+                # free_nats = 100.0  # you will tune this
+                # kl_eff = torch.clamp(kl_per_sample - free_nats, min=0.0).mean()
+
+                # this is mean over everything like I had originally
+                # B = kl_elem.size(0)
+                # kl_sum_per_sample = kl_elem.view(B, -1).sum(dim=1)   # (B,)
+                # N_lat = kl_elem[0].numel()                            # C*D*H*W
+
+                # # free-bits in sum-space
+                # free_nats_sum = 0.05 * N_lat  # e.g. 0.05 nats per latent element
+                # kl_eff_sum = torch.clamp(kl_sum_per_sample - free_nats_sum, min=0.0)  # (B,)
+                # # # convert back to mean-per-element scale
+                # kl_eff = (kl_eff_sum / N_lat).mean()  # scalar
+
+                # Now try mean
+                # kl_elem = kl_elem.mean(dim=1)
+                # free_nats_sum = 0.05   # e.g. 0.05 nats per latent element
+                # kl_eff_sum = torch.clamp(kl_elem - free_nats_sum, min=0.0)  # (B,)
+                # kl_eff = kl_eff_sum.mean()  # scalar
+                # kl = kl_eff
+
+                kl = kl_elem.mean()
                 # flatten all non-batch dims:
-                kl = kl_elem.view(kl_elem.size(0), -1).mean(dim=1).mean()  # MEAN over latent elems
+                # kl = kl_elem.view(kl_elem.size(0), -1).mean(dim=1).mean()  # MEAN over latent elems
             else: 
                 var = z_sigma.pow(2)
                 logvar = 2.0 * torch.log(z_sigma)
                 kl_per_elem = 0.5 * (z_mean.pow(2) + var - logvar - 1)
 
                 kl = kl_per_elem.view(kl_per_elem.size(0), -1).mean()
+        # If stnd is fixed give the option for L2 regularization
+        elif self.training and self.beta > 0 and self.fixed_std is not None:
+            kl = z_mean.pow(2).mean()
 
         if self.training:     
             recon_loss = self.get_loss(decoded, net_input)
 
-            vae_loss = recon_loss + self.beta * kl
+            # kl_weighted = self.beta * kl
+            # kl_cap = 0.1 * recon_loss.detach()  # e.g. cap KL at 10% of recon
+            # kl_weighted_capped = torch.minimum(kl_weighted, kl_cap)
 
+            # kl_free = 0.05  # try 0.02, 0.05, 0.1
+            # kl_eff = torch.clamp(kl - kl_free, min=0.0)
+
+
+            vae_loss = recon_loss + self.beta * kl
+            # vae_loss = recon_loss + kl_weighted_capped
+            self.meter.update(recon_loss, kl, self.beta)
+            self.debug_step += 1
+            if self.debug_step % 100 == 0 and self.debug_mode:
+                print("Debug Step:", self.debug_step)
+                print("Loss Averages:", self.meter.averages())
+                self.meter.reset()
+                print(f"Z_mean standard deviation {z_mean.std().item():.6f}")
+                # print(f"kl_elem valus is {kl_elem.mean().item():.6f}")
+                # print(f"kl effective value is {kl_eff.item():.6f}")
             return decoded, vae_loss
         return decoded
     
@@ -497,18 +567,26 @@ class CustomVAE(nn.Module):
         z_mean = maybe_checkpoint(self.vae_mean_layer, x_vae, self.use_checkpoint, self.training)
         if self.debug_mode:
             print("Z_mean shape after vae_mean_layer:", z_mean.shape)
-        z_sigma = maybe_checkpoint(self.vae_std_layer, x_vae, self.use_checkpoint, self.training)
+        
+        if self.fixed_std is None:
+            z_sigma = maybe_checkpoint(self.vae_std_layer, x_vae, self.use_checkpoint, self.training)
+        else:
+            z_sigma = self.fixed_std
 
         z_mean_rand = torch.randn_like(z_mean)
         z_mean_rand.requires_grad_(False)
 
         # Consider adding some epsilon to maintain numerical stability
-        if self.use_log_var:
-            log_var = z_sigma
-            log_var = torch.clamp(log_var, min=-30.0, max=20.0)  # typical safe range
-            std     = torch.exp(0.5 * z_sigma)   # σ = exp(.5 * logvar)
+        if self.fixed_std is None:
+            if self.use_log_var:
+                log_var = z_sigma
+                log_var = torch.clamp(log_var, min=-30.0, max=20.0)  # typical safe range
+                std     = torch.exp(0.5 * log_var)   # σ = exp(.5 * logvar)
+            else:
+                std = F.softplus(z_sigma) + 1e-6
         else:
-            std = F.softplus(z_sigma) + 1e-6
+            log_var = None
+            std = z_sigma
         return z_mean, std, z_mean_rand, log_var if self.use_log_var else None
        
 
@@ -609,9 +687,9 @@ class CustomVAE(nn.Module):
         # upsample_mode is stored as string -> CustomVAE accepts string or enum
         model = cls(**hparams)
         model.load_state_dict(ckpt["state_dict"])
+        if map_location is not None:
+            model = model.to(map_location)
         return model
-
-
 
 
 if __name__ == "__main__":
