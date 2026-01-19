@@ -10,12 +10,16 @@ import wandb
 import numpy as np
 from pathlib import Path
 import os
+import matplotlib.pyplot as plt
+
 
 from .image_utils import (safe_delete, 
-                          prepare_for_wandb, 
+                          prepare_for_wandb,
+                          prepare_for_wandb_hu, 
                           volume_to_gif_frames, 
                           save_gif, 
-                          save_mp4)
+                          save_mp4,
+                          log_slice_montage)
 
 def isfinite_all(t: torch.Tensor) -> bool:
     return torch.isfinite(t).all().item()
@@ -48,6 +52,8 @@ class Trainer:
         Initialize a Trainer for 3D VAE training with support for gradient
         accumulation, mixed precision, checkpointing, and optional distributed
         operation.
+
+        This also includes 30% of the steps as beta warmups.
 
         Parameters
         ----------
@@ -167,6 +173,13 @@ class Trainer:
 
         # Track global optimizer steps (not batches)
         self.global_step = 0
+        # Warmup steps is based on 30% of total data and therefore beta steps will increment every batch
+        self.warmup_steps = 0
+        self.beta_steps = 0
+        if self.is_distributed:
+            self.max_beta = self.model.module.get_beta()
+        else:
+            self.max_beta = self.model.get_beta()
 
         # Best validation loss so far (for "best model" saving)
         self.best_val_loss = float("inf")
@@ -223,8 +236,18 @@ class Trainer:
         )
 
         for step, batch in enumerate(iterator):
+            self.beta_steps += 1
             # assuming dataloader yields just x; if (x, y) later, unpack here
             x = batch.to(self.device, non_blocking=True)
+
+            current_beta = self.beta_warmup(self.beta_steps)
+            if self.is_distributed:
+                self.model.module.set_beta(current_beta)
+            else:
+                self.model.set_beta(current_beta)
+
+            if self.use_wandb:
+                wandb.log({"train/beta": current_beta})
 
             # ----- forward with optional AMP -----
             if self.use_amp:
@@ -262,7 +285,7 @@ class Trainer:
                     param_norm = p.grad.data.norm(2)
                     total_grad_norm += param_norm.item() ** 2
             total_grad_norm = total_grad_norm ** 0.5
-            if self.is_main_process:  # rank == 0
+            if self.is_main_process and self.use_wandb:  # rank == 0
                 wandb.log({"train/grad_norm": total_grad_norm})
 
             running_loss += raw_loss.item()
@@ -292,7 +315,7 @@ class Trainer:
                             p.data.nan_to_num().max().item())
                         raise RuntimeError(f"Non-finite param at {n}")
 
-                if self.is_main_process:
+                if self.is_main_process and self.use_wandb:
                     wandb.log({"grad_norm_true": true_grad_norm})
 
                 # --- increment global step after each optimizer step ---
@@ -433,8 +456,8 @@ class Trainer:
 
                 # ---- 2D middle slice images (what you already had) ----
                 mid = vol_in.shape[0] // 2
-                x_slice = prepare_for_wandb(vol_in[mid])
-                out_slice = prepare_for_wandb(vol_out[mid])
+                x_slice = prepare_for_wandb_hu(vol_in[mid])
+                out_slice = prepare_for_wandb_hu(vol_out[mid])
 
                 wandb.log({
                     "recon/inputs_mid_slice": wandb.Image(x_slice),
@@ -479,7 +502,82 @@ class Trainer:
                     safe_delete(output_gif_path)
                     safe_delete(output_mp4_path)
 
-        
+                    ## Now code to check the smoothness of the latent space
+                    if self.is_distributed:
+                        encoder = self.model.module.encode
+                        decoder = self.model.module.decode
+                    else:
+                        encoder = self.model.encode
+                        decoder = self.model.decode
+                    x_a = x[0:1,:,:,:,:]
+                    x_b = None
+                    if x.shape[0] >= 2:
+                        x_b = x[1:2,:,:,:,:]
+                    with torch.no_grad():
+                        if self.use_amp:
+                            with torch.amp.autocast():
+                                z_a, stnd_a, eps_a, _ = encoder(x_a)
+                                if x_b is not None:
+                                    z_b, stnd_b, eps_b, _ = encoder(x_b)
+                        else:
+                            z_a, stnd_a, eps_a, _ = encoder(x_a)
+                            if x_b is not None:
+                                z_b, stnd_b, eps_b, _ = encoder(x_b)
+                        decoded_slices = []
+                        labels = []
+                        interpolated_slices = []
+                        interpolated_labels = []
+
+                        # This test is the latent smooth locally around an image
+                        for sig in [0.0, 0.01, .25, 0.5, 1.0, 2.0]:
+                            z2 = z_a + stnd_a * sig * torch.randn_like(z_a)
+                            if self.use_amp:
+                                with torch.amp.autocast():
+                                    x_dec = decoder(z2)
+                            else:
+                                x_dec = decoder(z2)
+
+                            vol = x_dec[0, 0]              # (D, H, W)
+                            mid = vol.shape[0] // 2
+                            
+                            img = prepare_for_wandb_hu(vol[mid])   # returns 2D array for wandb
+                            decoded_slices.append(img)
+                            labels.append(f"σ={sig:g}")
+
+                        plt_fig = log_slice_montage(decoded_slices, labels)
+                        wandb.log({"latent/local_noise_mid_slice": wandb.Image(plt_fig)})
+                        plt.close(plt_fig)
+
+                        # Interpolate between z_a and z_b
+                        # This test is to check are there smooth latents between two samples in the dataset
+                        # Very important for the downstream task of predicting one image based off an earlier one
+                        if z_b is not None:
+                            for alpha in [0.0, 0.25, 0.5, 0.75, 1.0]:
+                                z_interp = (1 - alpha) * z_a + alpha * z_b
+                                if self.use_amp:
+                                    with torch.amp.autocast():
+                                        x_interp = decoder(z_interp)
+                                else:
+                                    x_interp = decoder(z_interp)
+                                vol_interp = x_interp[0, 0]
+                                mid_interp = vol_interp.shape[0] // 2
+                                img_interp = prepare_for_wandb_hu(vol_interp[mid_interp])
+                                interpolated_slices.append(img_interp)
+                                interpolated_labels.append(f"α={alpha:g}")
+
+                            plt_fig2 = log_slice_montage(interpolated_slices, interpolated_labels)
+                            wandb.log({"latent/interpolation": wandb.Image(plt_fig2)})
+                            plt.close(plt_fig2)
+
+                        # Decode pure noise to see if it is a standard gaussion latent
+                        gauss_noise = torch.randn_like(z_a)
+                        dec_gauss = decoder(gauss_noise)
+                        vol_gauss = dec_gauss[0, 0]
+                        mid_gauss = vol_gauss.shape[0] // 2
+                        img_gauss = prepare_for_wandb_hu(vol_gauss[mid_gauss])
+                        wandb.log({"latent/gaussian_noise_decoded": wandb.Image(img_gauss)})
+
+
         loss_average = sum(losses) / max(len(losses), 1)
         recon_l1_average = sum(recons) / max(len(recons), 1)
 
@@ -489,13 +587,23 @@ class Trainer:
      
         return loss_average, recon_l1_average
     
+    def beta_warmup(self, step):
+        if step >= self.warmup_steps:
+            return self.max_beta
+        return self.max_beta * (step / self.warmup_steps)
+
     def train(self, train_loader, val_loader=None, num_epochs: int = 10,
               train_sampler=None, val_sampler=None):
         """
         High-level training loop.
         train_sampler: DistributedSampler in DDP (so we can call set_epoch).
+
+        Note for full latent space theck the validation batch size must be 2 or greater  
         """
         history = {"train_loss": [], "val_loss": []}
+
+        # warmup should work even if it is ddp because each loader will have fewer elements
+        self.warmup_steps = .3 * num_epochs * len(train_loader)
 
         for epoch in range(num_epochs):
             if train_sampler is not None:
